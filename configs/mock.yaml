@@ -1,0 +1,48 @@
+schema_version: flcva-config-v1
+protocol_id: flcva-engineering-mock-v3
+run_id: flcva-mock-v3-r13
+stage: mock
+backend: mock
+global_seed: 20260724
+model:
+  id: mock/label-blind
+  revision: mock-v1
+  tokenizer_revision: mock-v1
+  trust_remote_code: false
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.5
+  max_model_len: 2048
+dataset:
+  id: smoke
+  source: jsonl
+  revision: smoke-v1
+  split: test
+  public_path: data/smoke_public.jsonl
+  labels_path: data/smoke_labels.jsonl
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  repetition_penalty: 1.0
+protocol:
+  spines_per_problem: 4
+  checkpoint_interval: 256
+  reasoning_max_tokens: 1024
+  continuation_branches: 4
+  continuation_tokens: 256
+  answer_max_tokens: 32
+  answer_cue: 'Therefore, the final answer is \boxed{'
+scorer:
+  backend: mock
+  id: mock/prm
+  revision: mock-v1
+  batch_size: 8
+  step_separator: <extra_0>
+  system_prompt: 'Please reason step by step, and put your final answer within \boxed{}.'
+execution:
+  result_root: runs
+  shard_index: 0
+  num_shards: 1
+  limit: 2
+  bootstrap_replicates: 50
+  permutation_replicates: 20
+  fixed_allotment_tokens: 1024

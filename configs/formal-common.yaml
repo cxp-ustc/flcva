@@ -1,0 +1,48 @@
+schema_version: flcva-config-v1
+protocol_id: flcva-2025-cutoff-v3
+run_id: override-me
+stage: canary
+backend: vllm
+global_seed: 20260724
+model:
+  id: override/model
+  revision: '0000000000000000000000000000000000000000'
+  tokenizer_revision: '0000000000000000000000000000000000000000'
+  trust_remote_code: true
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 8192
+dataset:
+  id: combined
+  source: jsonl
+  revision: 9b1270719cb5cf723979a420f973af4c7eee066048d92db65d4e26ff8c8729ef
+  split: test
+  public_path: data/frozen/combined_public.jsonl
+  labels_path: data/sealed/combined_labels.jsonl
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  repetition_penalty: 1.0
+protocol:
+  spines_per_problem: 4
+  checkpoint_interval: 256
+  reasoning_max_tokens: 4096
+  continuation_branches: 4
+  continuation_tokens: 256
+  answer_max_tokens: 32
+  answer_cue: 'Therefore, the final answer is \boxed{'
+scorer:
+  backend: qwen_prm
+  id: Qwen/Qwen2.5-Math-PRM-7B
+  revision: 0610740060112df12585d00a1c5f4624d2f59051
+  batch_size: 2
+  step_separator: <extra_0>
+  system_prompt: 'Please reason step by step, and put your final answer within \boxed{}.'
+execution:
+  result_root: runs
+  shard_index: 0
+  num_shards: 1
+  limit: null
+  bootstrap_replicates: 2000
+  permutation_replicates: 1000
+  fixed_allotment_tokens: 1024

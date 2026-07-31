@@ -1,0 +1,42 @@
+{
+  "schema_version": "flcva-frozen-architectures-v1",
+  "flop_convention": "One multiply-add is two floating-point operations.",
+  "models": {
+    "DeepSeek-R1-Distill-Qwen-7B": {
+      "config_sha256": "8290d3c1e385e2616572eb6926f7e2745f901d1c13da95970326a8a73f6c379c",
+      "head_dim": 128,
+      "hidden_size": 3584,
+      "intermediate_size": 18944,
+      "num_attention_heads": 28,
+      "num_hidden_layers": 28,
+      "num_key_value_heads": 4,
+      "revision": "916b56a44061fd5cd7d6a8fb632557ed4f724f60",
+      "source": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/raw/916b56a44061fd5cd7d6a8fb632557ed4f724f60/config.json",
+      "vocab_size": 152064
+    },
+    "Qwen2.5-Math-PRM-7B": {
+      "config_sha256": "70d5ef2f21af53e6c95252d8838f4898fbac6c83708a67c9c7c3f83f75318bbe",
+      "head_dim": 128,
+      "hidden_size": 3584,
+      "intermediate_size": 18944,
+      "num_attention_heads": 28,
+      "num_hidden_layers": 28,
+      "num_key_value_heads": 4,
+      "revision": "0610740060112df12585d00a1c5f4624d2f59051",
+      "source": "https://huggingface.co/Qwen/Qwen2.5-Math-PRM-7B/raw/0610740060112df12585d00a1c5f4624d2f59051/config.json",
+      "vocab_size": 152064
+    },
+    "Qwen3-8B": {
+      "config_sha256": "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30",
+      "head_dim": 128,
+      "hidden_size": 4096,
+      "intermediate_size": 12288,
+      "num_attention_heads": 32,
+      "num_hidden_layers": 36,
+      "num_key_value_heads": 8,
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "source": "https://huggingface.co/Qwen/Qwen3-8B/raw/b968826d9c46dd6066d109eabc6255188de91218/config.json",
+      "vocab_size": 151936
+    }
+  }
+}

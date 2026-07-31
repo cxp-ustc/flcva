@@ -1,0 +1,78 @@
+schema_version: flcva-replication-campaign-v1
+protocol_id: flcva-llama-architecture-replication-v1
+parent_protocol_id: flcva-2025-cutoff-v3
+parent_campaign_sha256: 992b4d8b277f20d14d70b0a5ce1de1ed3693f9691206d89302e68bd32685e958
+analysis_status: post-seal external architecture replication
+global_seed: 20260724
+models:
+  deepseek_r1_distill_llama_8b:
+    id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    revision: 6a6f4aa4197940add57724a7707d069478df56b1
+    tokenizer_revision: 6a6f4aa4197940add57724a7707d069478df56b1
+model_runtime:
+  trust_remote_code: true
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 8192
+difficulty_reference:
+  protocol_id: flcva-2025-cutoff-v3
+  campaign_sha256: 992b4d8b277f20d14d70b0a5ce1de1ed3693f9691206d89302e68bd32685e958
+  models:
+    - Qwen/Qwen3-8B
+    - deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+  include_current_outcomes: false
+  interpretation: frozen primary-study diagnostic stratifier
+scorer:
+  backend: qwen_prm
+  id: Qwen/Qwen2.5-Math-PRM-7B
+  revision: 0610740060112df12585d00a1c5f4624d2f59051
+  batch_size: 2
+  step_separator: <extra_0>
+  system_prompt: 'Please reason step by step, and put your final answer within \boxed{}.'
+datasets:
+  gsm8k:
+    id: openai/gsm8k
+    revision: 740312add88f781978c0658806c59bc2815b9866
+    split: test
+    problems: 1319
+    public_sha256: 3e10f98292222f1810628ae93a30162770275665583256e91e643568429698e1
+  math500:
+    id: HuggingFaceH4/MATH-500
+    revision: 6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be
+    split: test
+    problems: 500
+    public_sha256: ba784f880811552bb466a2b4866079a6847cb6c9edf53a5a9bd376c11930d708
+  combined:
+    id: combined
+    source: jsonl
+    revision: 9b1270719cb5cf723979a420f973af4c7eee066048d92db65d4e26ff8c8729ef
+    split: test
+    public_path: data/frozen/combined_public.jsonl
+    labels_path: data/sealed/combined_labels.jsonl
+    problems: 1819
+    public_sha256: 9b1270719cb5cf723979a420f973af4c7eee066048d92db65d4e26ff8c8729ef
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  repetition_penalty: 1.0
+protocol:
+  spines_per_problem: 4
+  reasoning_max_tokens: 4096
+  checkpoint_interval: 256
+  continuation_branches: 4
+  continuation_tokens: 256
+  answer_max_tokens: 32
+  answer_cue: 'Therefore, the final answer is \boxed{'
+  total_problems: 1819
+  total_spines: 7276
+  total_checkpoints: 116416
+  eligible_checkpoints: 109140
+  branch_references: 436560
+  generated_tokens_max: 127824768
+analysis:
+  split: sha256(dataset_id:problem_id)%100
+  analysis_percent: 80
+  confirmation_percent: 20
+  bootstrap_replicates: 2000
+  permutation_replicates: 1000
+  fixed_allotment_tokens: 1024
