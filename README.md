@@ -22,14 +22,17 @@ same answer operator, and accounts for all observations used by a policy.
 Python 3.10 or newer is required.
 
 ```bash
-python -m pip install -e '.[dev]'
+python -m pip install -r requirements.txt
 ```
 
 GPU generation additionally requires the frozen vLLM API series:
 
 ```bash
-python -m pip install -e '.[gpu]'
+python -m pip install -r requirements-gpu.txt
 ```
+
+These requirement files are thin entry points to the dependency groups in
+`pyproject.toml`, which remains the single source of dependency versions.
 
 Model and dataset revisions are pinned in `configs/frozen.yaml`. Remote model
 snapshots are resolved from Hugging Face at the specified commit. A local
