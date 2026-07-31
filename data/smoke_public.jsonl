@@ -1,0 +1,3 @@
+{"id":"smoke-001","dataset_id":"gsm8k","question":"Mira has 3 red balls and buys 2 more. How many red balls does she have?"}
+{"id":"smoke-002","dataset_id":"math500","question":"Compute 2^3."}
+
