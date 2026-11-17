@@ -1,7 +1,8 @@
 fe6955727ced4aacfadf54a8576cb22ae456e6cf8e4f13a7799087169c4cc6ee  ./.gitignore
 8e02c6d36dc434d07df18cb97006723400be4a6595e003413fae751a3d767aef  ./ARTIFACT_SCOPE.md
 ab7209e1c5060d3ba6669eaa8e8c9a4274fe4a495f980b23650a90e375fd734f  ./LICENSE_FOR_REVIEW.md
-cb31ea198d248c30488b7f78a8c879fcdc361976611e6258f42641b3c50dcede  ./README.md
+33c2d0fe38d7926e0617c5db7336710724f0b7facba762b5e973d01078f722fb  ./README.md
+9220f8a917a83733d8989f93a2ee6ee2cc54b6e2a5e2d009755cda1456867b3e  ./assets/flcva-overview.png
 d5438377148fadc2bfa8f2e9eb2445cd059d2a363b9357c8e4cfd4e1aa876e6f  ./configs/formal-common.yaml
 f3ed2866e90acd8520bc345ad239b8ae1e4fcd407671e2f7d28bed7797393abe  ./configs/formal-deepseek.yaml
 d57848f4cf1d36ce6c03cb63c7553ea066b4cbf69785e340e9de9499d871347c  ./configs/formal-qwen3.yaml

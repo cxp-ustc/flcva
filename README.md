@@ -24,22 +24,9 @@ University of Science and Technology of China
 
 The **Full-Ledger Counterfactual Value Audit (FLCVA)** measures the value of continuing from the same frozen reasoning prefix. It compares answering immediately with four fixed-length continuations, evaluates every endpoint with the same answer procedure, and charges every observation used by an allocation policy.
 
-```mermaid
-flowchart LR
-    P["Frozen reasoning prefix"] --> S["Answer now"]
-    P --> C["Four 256-token continuations<br/>1 stored + 3 independently sampled"]
-    S --> V["Signed continuation value<br/>Correctness change / token cost"]
-    C --> V
-    V --> E["Evaluate signals and allocation<br/>Full cost accounting"]
-    classDef prefix fill:#DBEAF3,stroke:#254B67,color:#17354A,stroke-width:2px;
-    classDef action fill:#FFF1CC,stroke:#AA8138,color:#483510;
-    classDef value fill:#DDEEE4,stroke:#3D7C5F,color:#204D38,stroke-width:2px;
-    classDef evaluation fill:#EAE4F3,stroke:#796395,color:#49365E;
-    class P prefix;
-    class S,C action;
-    class V value;
-    class E evaluation;
-```
+<p align="center">
+  <img src="assets/flcva-overview.png" alt="FLCVA framework: answer-now and four continuations from a frozen prefix, signed continuation value, proxy audit, and full-ledger allocation replay." width="100%">
+</p>
 
 The reported value is mean correctness change divided by mean continuation cost, including answer tokens, expressed **per 1,000 logical tokens**. The audit separates three questions:
 
