@@ -135,7 +135,7 @@ python scripts/render_paper_results.py \
   --deepseek-run runs/flcva-deepseek-local
 ```
 
-It writes result macros to `paper/results.tex` and figures and tables to `paper/generated/` by default. See [`ARTIFACT_SCOPE.md`](ARTIFACT_SCOPE.md) for the expected analysis inputs and artifact scope.
+It writes result macros to `paper/results.tex` and figures and tables to `paper/generated/` by default. See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) for the required analysis inputs and repository contents.
 
 - [`paper/analysis/`](paper/analysis/) contains controller decomposition, bootstrap, conditional-information, non-myopic scheduling, and transfer analyses.
 - [`paper/ablation/`](paper/ablation/) contains answer-cue and continuation-length robustness analyses.
