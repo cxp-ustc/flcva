@@ -13,7 +13,6 @@ from .io import (
     atomic_write_json,
     atomic_write_json_gz,
     atomic_write_jsonl_gz,
-    file_sha256,
     iter_problem_artifacts,
     read_json_gz,
     seal_record,
@@ -35,7 +34,6 @@ from .statistics import (
     jeffreys_bin_probabilities,
     roc_auc,
 )
-
 
 PROXY_NAMES = (
     "persistence",
@@ -102,7 +100,11 @@ def _top20_entropy(rows: list[dict[str, float]]) -> float | None:
         if residual:
             probabilities.append(residual)
         entropies.append(
-            -sum(probability * math.log(probability) for probability in probabilities if probability > 0)
+            -sum(
+                probability * math.log(probability)
+                for probability in probabilities
+                if probability > 0
+            )
         )
     return sum(entropies) / len(entropies) if entropies else None
 
@@ -277,7 +279,9 @@ def _proxy_rows(
             }
             missing = {
                 "persistence": persistence_reason,
-                "answer_confidence": None if confidence is not None else "missing_logprobs",
+                "answer_confidence": (
+                    None if confidence is not None else "missing_logprobs"
+                ),
                 "modal_agreement": (
                     None
                     if agreements.get(checkpoint_id) is not None
@@ -285,7 +289,9 @@ def _proxy_rows(
                 ),
                 "prm_min_step": prm_reason,
                 "anll": None if anll is not None else "missing_logprobs",
-                "top20_entropy": None if entropy is not None else "missing_top20_logprobs",
+                "top20_entropy": (
+                    None if entropy is not None else "missing_top20_logprobs"
+                ),
             }
             output[checkpoint_id] = values | {
                 f"{key}__missing": missing[key] for key in values
@@ -484,12 +490,9 @@ def _stratified_proxy_summary(
                     ].append(row)
             for key, group in sorted(groups.items(), key=lambda item: str(item[0])):
                 y = [int(getattr(row, target)) for row in group]
-                scores = [
-                    orientation * float(row.proxies[proxy]) for row in group
-                ]
+                scores = [orientation * float(row.proxies[proxy]) for row in group]
                 predicted = [
-                    probabilities.get(bins.assign(score), base_rate)
-                    for score in scores
+                    probabilities.get(bins.assign(score), base_rate) for score in scores
                 ]
                 output.append(
                     {
@@ -511,7 +514,9 @@ def _stratified_proxy_summary(
     return output
 
 
-def _matched_cells(records: list[ValueRecord]) -> tuple[list[MatchedCell], dict[str, Any]]:
+def _matched_cells(
+    records: list[ValueRecord],
+) -> tuple[list[MatchedCell], dict[str, Any]]:
     cells: list[MatchedCell] = []
     attrition: Counter[str] = Counter()
     for proxy in PROXY_NAMES:
@@ -562,9 +567,7 @@ def _matched_cells(records: list[ValueRecord]) -> tuple[list[MatchedCell], dict[
                         "stop_correct": int(key[4]),
                         "proxy_bin": int(key[5]),
                     },
-                    nonzero_checkpoint_ids=sorted(
-                        row.checkpoint_id for row in nonzero
-                    ),
+                    nonzero_checkpoint_ids=sorted(row.checkpoint_id for row in nonzero),
                     zero_checkpoint_ids=sorted(row.checkpoint_id for row in zero),
                     proxy_min=min(values),
                     proxy_max=max(values),
@@ -574,9 +577,7 @@ def _matched_cells(records: list[ValueRecord]) -> tuple[list[MatchedCell], dict[
     collision_checkpoint_ids = {
         checkpoint_id
         for cell in cells
-        for checkpoint_id in (
-            cell.nonzero_checkpoint_ids + cell.zero_checkpoint_ids
-        )
+        for checkpoint_id in (cell.nonzero_checkpoint_ids + cell.zero_checkpoint_ids)
     }
     collision_members = len(collision_checkpoint_ids)
     confirmation = sum(row.split == "confirmation" for row in records)
@@ -604,9 +605,8 @@ def _matched_cells(records: list[ValueRecord]) -> tuple[list[MatchedCell], dict[
                 for checkpoint_id in cell.zero_checkpoint_ids
             ]
             weight = min(len(nonzero_values), len(zero_values))
-            gap = (
-                sum(nonzero_values) / len(nonzero_values)
-                - sum(zero_values) / len(zero_values)
+            gap = sum(nonzero_values) / len(nonzero_values) - sum(zero_values) / len(
+                zero_values
             )
             weighted_sum += weight * gap
             weight_sum += weight
@@ -721,9 +721,7 @@ def _headline_test(
             "group": (
                 "high"
                 if float(row.proxies["persistence"]) >= high_cut
-                else "low"
-                if float(row.proxies["persistence"]) <= low_cut
-                else "middle"
+                else "low" if float(row.proxies["persistence"]) <= low_cut else "middle"
             ),
             "marginal_value": row.marginal_value,
         }
@@ -764,10 +762,7 @@ def evaluate_run(
     *,
     peer_run_dirs: list[Path] | None = None,
 ) -> dict[str, Any]:
-    normalized_peer_dirs = [
-        path.resolve()
-        for path in (peer_run_dirs or [])
-    ]
+    normalized_peer_dirs = [path.resolve() for path in (peer_run_dirs or [])]
     difficulty_design = (
         formal_difficulty_design(config, project_root)
         if config.stage == "formal"
@@ -781,9 +776,7 @@ def evaluate_run(
                 if required_peers == 1
                 else f"{required_peers} frozen difficulty-reference runs"
             )
-            raise ValueError(
-                f"formal evaluation requires exactly {qualifier}"
-            )
+            raise ValueError(f"formal evaluation requires exactly {qualifier}")
     run_dir = resolve_run_dir(config, project_root)
     verify_recorded_contract(config, project_root, run_dir)
     labels, gold_label_attestation = load_attested_gold_labels(
@@ -848,14 +841,10 @@ def evaluate_run(
         artifact = item["artifact"]
         checkpoints = item["checkpoints"]
         branches = item["branches"]
-        generation_events = {
-            event["event_id"]: event
-            for event in artifact["ledger"]
-        }
+        generation_events = {event["event_id"]: event for event in artifact["ledger"]}
         score_payload = score_payloads.get(problem_id, {})
         score_events = {
-            event["event_id"]: event
-            for event in score_payload.get("ledger", [])
+            event["event_id"]: event for event in score_payload.get("ledger", [])
         }
         prm: dict[str, tuple[float | None, str | None, int]] = {}
         for proxy in score_payload.get("proxies", []):
@@ -1021,9 +1010,11 @@ def evaluate_run(
                     "marginal_value": (
                         float(record.marginal_value) if record else None
                     ),
-                    "proxies": proxy_map[checkpoint["checkpoint_id"]]
-                    if checkpoint["checkpoint_id"] in proxy_map
-                    else {name: None for name in PROXY_NAMES},
+                    "proxies": (
+                        proxy_map[checkpoint["checkpoint_id"]]
+                        if checkpoint["checkpoint_id"] in proxy_map
+                        else {name: None for name in PROXY_NAMES}
+                    ),
                     "proxy_costs": {
                         "prm_min_step": prm.get(
                             checkpoint["checkpoint_id"],
@@ -1086,12 +1077,7 @@ def evaluate_run(
             "difficulty_reference_models": (
                 list(difficulty_design["reference_models"])
                 if difficulty_design is not None
-                else sorted(
-                    {
-                        checkpoint["model_id"]
-                        for checkpoint in all_checkpoints
-                    }
-                )
+                else sorted({checkpoint["model_id"] for checkpoint in all_checkpoints})
             ),
             "difficulty_current_outcomes_excluded": (
                 not bool(difficulty_design["include_current_outcomes"])
@@ -1114,10 +1100,9 @@ def evaluate_run(
                 config.global_seed,
             ),
             "stratified_metrics": _stratified_proxy_summary(values),
-            "artifacts_sha256": {
-                str(path.relative_to(evaluation_dir)): file_sha256(path)
-                for path in sorted(artifact_paths)
-            },
+            "artifacts": [
+                str(path.relative_to(evaluation_dir)) for path in sorted(artifact_paths)
+            ],
         }
     )
     atomic_write_json(evaluation_dir / "summary.json", summary)

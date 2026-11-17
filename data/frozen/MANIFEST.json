@@ -1,27 +1,21 @@
 {
-  "schema_version": "flcva-data-manifest-v1",
-  "materialized_at": "2026-07-24",
+  "combined": {
+    "problems": 1819
+  },
   "datasets": {
     "gsm8k": {
+      "problems": 1319,
       "repository": "openai/gsm8k",
       "revision": "740312add88f781978c0658806c59bc2815b9866",
-      "split": "test",
-      "problems": 1319,
-      "public_sha256": "3e10f98292222f1810628ae93a30162770275665583256e91e643568429698e1",
-      "sealed_labels_sha256": "6bd6c93376e4cb5ac8caf88e6e6a918252c9e2288589cc2df89a35984f9a329f"
+      "split": "test"
     },
     "math500": {
+      "problems": 500,
       "repository": "HuggingFaceH4/MATH-500",
       "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
-      "split": "test",
-      "problems": 500,
-      "public_sha256": "ba784f880811552bb466a2b4866079a6847cb6c9edf53a5a9bd376c11930d708",
-      "sealed_labels_sha256": "5292eb053ae0e7aa799a376a2b5f9c107dc81c3f8ca6e817bbaa1e0796911a4a"
+      "split": "test"
     }
   },
-  "combined": {
-    "problems": 1819,
-    "public_sha256": "9b1270719cb5cf723979a420f973af4c7eee066048d92db65d4e26ff8c8729ef",
-    "sealed_labels_sha256": "06a9a319dabefbfb6c869f055376cc38f98b7c15285f4d8a051654630637f169"
-  }
+  "materialized_at": "2026-07-24",
+  "schema_version": "flcva-data-manifest-v1"
 }

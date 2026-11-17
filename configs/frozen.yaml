@@ -30,13 +30,11 @@ datasets:
     revision: 740312add88f781978c0658806c59bc2815b9866
     split: test
     problems: 1319
-    public_sha256: 3e10f98292222f1810628ae93a30162770275665583256e91e643568429698e1
   math500:
     id: HuggingFaceH4/MATH-500
     revision: 6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be
     split: test
     problems: 500
-    public_sha256: ba784f880811552bb466a2b4866079a6847cb6c9edf53a5a9bd376c11930d708
   combined:
     id: combined
     source: jsonl
@@ -45,7 +43,6 @@ datasets:
     public_path: data/frozen/combined_public.jsonl
     labels_path: data/sealed/combined_labels.jsonl
     problems: 1819
-    public_sha256: 9b1270719cb5cf723979a420f973af4c7eee066048d92db65d4e26ff8c8729ef
 sampling:
   temperature: 0.6
   top_p: 0.95

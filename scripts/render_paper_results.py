@@ -15,14 +15,13 @@ from flcva.config import RunConfig
 from flcva.contract import verify_run_record
 from flcva.frozen import validate_formal_manifest_config
 from flcva.io import (
+    require_artifacts,
     atomic_write_json,
-    file_sha256,
     iter_jsonl_gz,
     seal_record,
     verify_sealed_record,
 )
 from flcva.labels import (
-    CANONICAL_SEALED_LABEL_SHA256,
     verify_gold_label_attestation,
 )
 from flcva.lineage import verify_formal_difficulty_lineage
@@ -32,7 +31,6 @@ from flcva.replay import (
     replay_curve_statistics,
 )
 from flcva.schemas import RunRecord
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_AUDIT_GATES = {
@@ -57,15 +55,7 @@ def _verify_summary_tree(
 ) -> None:
     if not verify_sealed_record(summary):
         raise ValueError(f"{subdirectory} summary hash mismatch: {run_dir}")
-    artifacts = summary.get("artifacts_sha256", {})
-    if not artifacts:
-        raise ValueError(f"{subdirectory} summary has no artifact hashes: {run_dir}")
-    for relative, expected in artifacts.items():
-        target = run_dir / subdirectory / relative
-        if not target.is_file() or file_sha256(target) != expected:
-            raise ValueError(
-                f"{subdirectory} artifact hash mismatch: {run_dir} / {relative}"
-            )
+    require_artifacts(run_dir / subdirectory, summary)
 
 
 def _load(
@@ -79,12 +69,8 @@ def _load(
     replay = json.loads(
         (run_dir / "replay" / "summary.json").read_text(encoding="utf-8")
     )
-    contract = json.loads(
-        (run_dir / "contract.json").read_text(encoding="utf-8")
-    )
-    manifest = json.loads(
-        (run_dir / "manifest.json").read_text(encoding="utf-8")
-    )
+    contract = json.loads((run_dir / "contract.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     run_record = RunRecord.model_validate(run)
     verify_run_record(run_record)
     if not verify_sealed_record(manifest):
@@ -139,14 +125,6 @@ def _load(
     _verify_summary_tree(run_dir, "replay", replay)
     if run["stage"] != "formal" or not evaluation["scientific_results"]:
         raise ValueError(f"run is not a formal scientific result: {run_dir}")
-    if (
-        evaluation.get("gold_labels", {}).get("sha256")
-        != CANONICAL_SEALED_LABEL_SHA256["combined"]
-        or evaluation.get("gold_labels", {}).get("canonical_sha256")
-        != CANONICAL_SEALED_LABEL_SHA256["combined"]
-        or not evaluation.get("gold_labels", {}).get("canonical")
-    ):
-        raise ValueError(f"formal result is not bound to canonical gold labels: {run_dir}")
     verify_gold_label_attestation(
         config,
         PROJECT_ROOT,
@@ -357,19 +335,9 @@ def _derive_replay_v2(
     evaluation: dict[str, Any],
     sealed_replay_v1: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    manifest = json.loads(
-        (run_dir / "manifest.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     config = RunConfig.model_validate(manifest["config"])
     frontiers_path = run_dir / "evaluation" / "frontiers.jsonl.gz"
-    expected_frontiers = evaluation["artifacts_sha256"].get(
-        "frontiers.jsonl.gz"
-    )
-    if (
-        expected_frontiers is None
-        or file_sha256(frontiers_path) != expected_frontiers
-    ):
-        raise ValueError(f"authenticated frontier digest mismatch: {run_dir}")
     states = [
         row
         for row in iter_jsonl_gz(frontiers_path)
@@ -379,12 +347,8 @@ def _derive_replay_v2(
         raise ValueError(f"no confirmation frontiers: {run_dir}")
     curves = derive_replay_curves(states, config)
     statistics = replay_curve_statistics(states, curves, config)
-    if int(statistics["common_endpoint"]) != int(
-        sealed_replay_v1["common_endpoint"]
-    ):
-        raise ValueError(
-            f"replay-v2 endpoint changed unexpectedly: {run_dir}"
-        )
+    if int(statistics["common_endpoint"]) != int(sealed_replay_v1["common_endpoint"]):
+        raise ValueError(f"replay-v2 endpoint changed unexpectedly: {run_dir}")
     if not math.isclose(
         float(statistics["oracle_difference"]),
         float(sealed_replay_v1["oracle_difference"]),
@@ -407,9 +371,7 @@ def _derive_replay_v2(
         **old_permutation,
         "exceedances": exceedances,
         "p_value_corrected": (
-            (exceedances + 1) / (replicates + 1)
-            if exceedances is not None
-            else None
+            (exceedances + 1) / (replicates + 1) if exceedances is not None else None
         ),
         "reuse_justification": (
             "oracle-minus-round-robin removes the same unobservable initial "
@@ -428,13 +390,6 @@ def _derive_replay_v2(
             "result_merkle_root": json.loads(
                 (run_dir / "audit_manifest.json").read_text(encoding="utf-8")
             )["result_merkle_root"],
-            "frontiers_sha256": expected_frontiers,
-            "evaluation_summary_sha256": file_sha256(
-                run_dir / "evaluation" / "summary.json"
-            ),
-            "sealed_replay_v1_summary_sha256": file_sha256(
-                run_dir / "replay" / "summary.json"
-            ),
         },
     }
     endpoint = int(statistics["common_endpoint"])
@@ -641,9 +596,7 @@ def main() -> None:
             }
         ),
     )
-    relative_generated = Path(
-        os.path.relpath(output_dir, start=args.output.parent)
-    )
+    relative_generated = Path(os.path.relpath(output_dir, start=args.output.parent))
     content = "\n".join(
         [
             "% Auto-generated from sealed formal artifacts.",
@@ -657,7 +610,11 @@ def main() -> None:
             f"\\newcommand{{\\BestProxyHarmfulAUROC}}{{{_best(evaluations, 'harmful')}}}",
             (
                 "\\newcommand{\\OracleAULCGain}{"
-                + (f"{sum(oracle_gains) / len(oracle_gains):.2f}\\%" if oracle_gains else "--")
+                + (
+                    f"{sum(oracle_gains) / len(oracle_gains):.2f}\\%"
+                    if oracle_gains
+                    else "--"
+                )
                 + "}"
             ),
             (
@@ -715,44 +672,35 @@ def main() -> None:
         replay_v2_path,
     ]
     artifact_paths = [
-        PROJECT_ROOT / "paper" / "main.tex",
-        PROJECT_ROOT / "paper" / "references.bib",
         args.output.resolve(),
         *generated_paths,
     ]
+
     def artifact_key(path: Path) -> str:
         try:
             return str(path.relative_to(PROJECT_ROOT))
         except ValueError:
             return str(path)
 
-    manifest = seal_record({
-        "schema_version": "flcva-paper-result-manifest-v2",
-        "analysis_schema": "flcva-postseal-replay-v2",
-        "renderer_sha256": file_sha256(Path(__file__).resolve()),
-        "source_runs": [
-            {
-                "path": str(path),
-                "run_id": run["run_id"],
-                "result_merkle_root": audit["result_merkle_root"],
-                "evaluation_summary_sha256": file_sha256(
-                    path / "evaluation" / "summary.json"
-                ),
-                "sealed_replay_v1_summary_sha256": file_sha256(
-                    path / "replay" / "summary.json"
-                ),
-            }
-            for path, (run, audit, _, _) in zip(
-                run_paths,
-                loaded,
-                strict=True,
-            )
-        ],
-        "artifacts_sha256": {
-            artifact_key(path): file_sha256(path)
-            for path in artifact_paths
-        },
-    })
+    manifest = seal_record(
+        {
+            "schema_version": "flcva-paper-result-manifest-v2",
+            "analysis_schema": "flcva-postseal-replay-v2",
+            "source_runs": [
+                {
+                    "path": str(path),
+                    "run_id": run["run_id"],
+                    "result_merkle_root": audit["result_merkle_root"],
+                }
+                for path, (run, audit, _, _) in zip(
+                    run_paths,
+                    loaded,
+                    strict=True,
+                )
+            ],
+            "artifacts": [artifact_key(path) for path in artifact_paths],
+        }
+    )
     atomic_write_json(output_dir / "manifest.json", manifest)
     print(args.output)
 

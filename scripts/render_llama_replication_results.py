@@ -18,12 +18,11 @@ from flcva.frozen import (
     validate_formal_manifest_config,
 )
 from flcva.io import (
+    require_artifacts,
     atomic_write_json,
-    file_sha256,
     seal_record,
     verify_sealed_record,
 )
-
 
 MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 MODEL_REVISION = "6a6f4aa4197940add57724a7707d069478df56b1"
@@ -37,21 +36,14 @@ def _read_sealed(path: Path) -> dict[str, Any]:
 
 
 def _verify_artifacts(root: Path, summary: dict[str, Any]) -> None:
-    artifacts = summary.get("artifacts_sha256")
-    if not isinstance(artifacts, dict) or not artifacts:
-        raise ValueError(f"summary has no artifact manifest: {root}")
-    for relative, expected in artifacts.items():
-        path = root / str(relative)
-        if not path.is_file() or file_sha256(path) != expected:
-            raise ValueError(f"artifact digest mismatch: {path}")
+    require_artifacts(root, summary)
 
 
 def _best_proxy(metrics: dict[str, Any], target: str) -> dict[str, Any]:
     rows = [
         (name, payload)
         for name, payload in metrics[target].items()
-        if payload.get("status") == "ok"
-        and payload.get("auroc") is not None
+        if payload.get("status") == "ok" and payload.get("auroc") is not None
     ]
     if not rows:
         raise ValueError(f"no valid proxy metric for {target}")
@@ -144,9 +136,7 @@ def _branch_estimands(values_path: Path) -> dict[str, dict[str, Any]]:
             raise ValueError(f"missing confirmation estimand population: {target}")
         rendered[target] = {
             **accumulator,
-            "single_draw_rate": (
-                float(accumulator["branch_events"]) / branch_trials
-            ),
+            "single_draw_rate": (float(accumulator["branch_events"]) / branch_trials),
             "four_draw_opportunity_rate": (
                 float(accumulator["opportunities"]) / checkpoints
             ),
@@ -202,9 +192,7 @@ def render(run_dir: Path, project_root: Path, output_dir: Path) -> dict[str, Any
     if (
         evaluation.get("scientific_results") is not True
         or evaluation.get("difficulty_current_outcomes_excluded") is not True
-        or evaluation.get("difficulty_lineage", {}).get(
-            "current_outcomes_excluded"
-        )
+        or evaluation.get("difficulty_lineage", {}).get("current_outcomes_excluded")
         is not True
     ):
         raise ValueError(
@@ -215,12 +203,8 @@ def render(run_dir: Path, project_root: Path, output_dir: Path) -> dict[str, Any
         _best_proxy(evaluation["metrics"], target)
         for target in ("beneficial", "harmful")
     ]
-    branch_estimands = _branch_estimands(
-        run_dir / "evaluation" / "values.jsonl.gz"
-    )
-    persistence_contrast = evaluation.get("headline", {}).get(
-        "contrast_high_minus_low"
-    )
+    branch_estimands = _branch_estimands(run_dir / "evaluation" / "values.jsonl.gz")
+    persistence_contrast = evaluation.get("headline", {}).get("contrast_high_minus_low")
     if (
         not isinstance(persistence_contrast, dict)
         or persistence_contrast.get("estimate") is None
@@ -337,18 +321,16 @@ def render(run_dir: Path, project_root: Path, output_dir: Path) -> dict[str, Any
     }
     macro_lines = [
         "% Auto-generated from the sealed Llama replication.",
-        "\\newcommand{\\LlamaPersistenceContrast}{"
-        f"{contrast['estimate']:+.3f}}}",
+        "\\newcommand{\\LlamaPersistenceContrast}{" f"{contrast['estimate']:+.3f}}}",
         "\\newcommand{\\LlamaPersistenceContrastCI}{"
         f"[{contrast['low']:.3f},{contrast['high']:.3f}]}}",
     ]
     macros_path = output_dir / "macros.tex"
     _atomic_text(macros_path, "\n".join(macro_lines) + "\n")
 
-    rendered_artifacts = {
-        path.name: file_sha256(path)
-        for path in (table_path, estimand_table_path, macros_path)
-    }
+    rendered_artifacts = [
+        path.name for path in (table_path, estimand_table_path, macros_path)
+    ]
     try:
         source_run = str(run_dir.relative_to(project_root))
     except ValueError as error:
@@ -358,10 +340,7 @@ def render(run_dir: Path, project_root: Path, output_dir: Path) -> dict[str, Any
     summary = seal_record(
         {
             "schema_version": "flcva-llama-replication-paper-v2",
-            "analysis_status": (
-                "separately sealed external architecture replication"
-            ),
-            "renderer_sha256": file_sha256(Path(__file__)),
+            "analysis_status": ("separately sealed external architecture replication"),
             "source_run": source_run,
             "run_id": config.run_id,
             "model_id": config.model.id,
@@ -369,27 +348,13 @@ def render(run_dir: Path, project_root: Path, output_dir: Path) -> dict[str, Any
             "frozen_campaign_sha256": campaign_sha256,
             "result_merkle_root": audit["result_merkle_root"],
             "current_outcomes_excluded_from_difficulty": True,
-            "difficulty_reference_models": evaluation[
-                "difficulty_reference_models"
-            ],
+            "difficulty_reference_models": evaluation["difficulty_reference_models"],
             "problems": int(evaluation["problems"]),
             "branch_estimands": branch_estimands,
             "persistence_high_minus_low": contrast,
             "best_proxies": proxy_rows,
             "replay": replay_rows,
-            "source_sha256": {
-                "manifest.json": file_sha256(run_dir / "manifest.json"),
-                "audit_manifest.json": file_sha256(
-                    run_dir / "audit_manifest.json"
-                ),
-                "evaluation/summary.json": file_sha256(
-                    run_dir / "evaluation" / "summary.json"
-                ),
-                "replay/summary.json": file_sha256(
-                    run_dir / "replay" / "summary.json"
-                ),
-            },
-            "artifacts_sha256": rendered_artifacts,
+            "artifacts": rendered_artifacts,
         }
     )
     summary_path = output_dir / "summary.json"

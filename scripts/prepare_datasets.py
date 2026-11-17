@@ -6,7 +6,6 @@ from pathlib import Path
 
 from flcva.config import RunConfig
 from flcva.data import materialize_dataset
-from flcva.io import file_sha256
 
 
 def main() -> None:
@@ -25,13 +24,12 @@ def main() -> None:
     )
     print(
         {
-            **counts,
-            "public_sha256": file_sha256(args.public_out),
-            "labels_sha256": file_sha256(args.labels_out),
+            "public_file": str(args.public_out),
+            "labels_file": str(args.labels_out),
+            "counts": counts,
         }
     )
 
 
 if __name__ == "__main__":
     main()
-

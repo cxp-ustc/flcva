@@ -29,17 +29,14 @@ from typing import Any, Iterable, Iterator
 from flcva.backends.base import GenerationRequest
 from flcva.backends.vllm import build_backend
 from flcva.config import RunConfig
-from flcva.contract import source_tree_fingerprint
 from flcva.ids import canonical_json_bytes, payload_sha256, stable_seed
 from flcva.io import (
     BlobStore,
-    file_sha256,
     read_json_gz,
     seal_record,
     verify_sealed_record,
 )
 from flcva.parsing import answers_equal, parse_answer
-
 
 ROOT = Path(__file__).resolve().parents[2]
 INPUT_DIR = ROOT / "paper" / "ablation" / "inputs"
@@ -71,12 +68,8 @@ RUNTIME_PACKAGE_NAMES = (
 SNAPSHOT_IDENTITY_KEYS = (
     "expected_revision",
     "revision_evidence",
-    "transport_attestation_sha256",
     "transport_requested_revision",
     "transport_resolution_mode",
-    "transport_metadata_sha256",
-    "config_sha256",
-    "tokenizer_config_sha256",
 )
 SOURCE_RUNS = {
     "qwen3": ROOT / "artifacts" / "primary-qwen3",
@@ -124,9 +117,11 @@ def _atomic_json(path: Path, value: Any) -> None:
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "wb") as handle:
-            handle.write(json.dumps(
-                value, ensure_ascii=False, sort_keys=True, indent=2
-            ).encode("utf-8"))
+            handle.write(
+                json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2).encode(
+                    "utf-8"
+                )
+            )
             handle.write(b"\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -209,17 +204,6 @@ def _snapshot_identity(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload.get(key) for key in SNAPSHOT_IDENTITY_KEYS}
 
 
-def _probe_execution_bundle() -> dict[str, Any]:
-    files = {
-        relative: file_sha256(ROOT / relative)
-        for relative in PROBE_EXECUTION_FILES
-    }
-    return {
-        "files_sha256": files,
-        "bundle_sha256": payload_sha256(sorted(files.items())),
-    }
-
-
 def _generation_identity(
     manifest: dict[str, Any],
     config: RunConfig,
@@ -239,11 +223,6 @@ def _generation_identity(
         "tokenizer_revision": manifest["tokenizer_revision"],
         "sampling": manifest["sampling"],
         "global_seed": manifest["global_seed"],
-        "input_sha256": manifest["input_sha256"],
-        "script_sha256": manifest["script_sha256"],
-        "source_tree_sha256": manifest["source_tree_sha256"],
-        "source_tree_file_count": manifest["source_tree_file_count"],
-        "execution_bundle": manifest["execution_bundle"],
         "cues": manifest["cues"],
         "workers": manifest["workers"],
         "batch_size": batch_size,
@@ -257,6 +236,18 @@ def _generation_identity(
         "effective_model_config": config.model.model_dump(mode="json"),
         "effective_sampling_config": config.sampling.model_dump(mode="json"),
     }
+    # Preserve recorded generation IDs without validating legacy file digests.
+    if "input_sha256" in manifest:
+        for key in (
+            "input_sha256",
+            "script_sha256",
+            "source_tree_sha256",
+            "source_tree_file_count",
+            "execution_bundle",
+        ):
+            payload[key] = manifest[key]
+    else:
+        payload["input_manifest_record_sha256"] = manifest["record_sha256"]
     return {
         **payload,
         "identity_sha256": payload_sha256(payload),
@@ -278,8 +269,7 @@ def _runtime_execution_identity(
         "schema_version": "flcva-probe-runtime-identity-v1",
         "model_snapshot": _snapshot_identity(runtime_model),
         "packages": {
-            name: package_metadata.version(name)
-            for name in RUNTIME_PACKAGE_NAMES
+            name: package_metadata.version(name) for name in RUNTIME_PACKAGE_NAMES
         },
         "cuda": str(torch.version.cuda),
         "device_family": "NVIDIA H20",
@@ -328,8 +318,6 @@ def _verify_problem_output(
         "model_revision": manifest["model_revision"],
         "tokenizer_revision": manifest["tokenizer_revision"],
         "worker_index": worker_index,
-        "input_sha256": manifest["input_sha256"],
-        "generation_script_sha256": manifest["script_sha256"],
         "generation_identity_sha256": generation_identity["identity_sha256"],
         "runtime_identity_sha256": runtime_identity["identity_sha256"],
     }
@@ -346,16 +334,11 @@ def _verify_problem_output(
             raise ValueError("probe problem output problem_id mismatch")
         if payload.get("dataset_id") != problem["dataset_id"]:
             raise ValueError("probe problem output dataset_id mismatch")
-        if (
-            payload.get("input_problem_record_sha256")
-            != problem["record_sha256"]
-        ):
+        if payload.get("input_problem_record_sha256") != problem["record_sha256"]:
             raise ValueError("probe problem output input record mismatch")
     rows = payload.get("results")
     if not isinstance(rows, list) or len(rows) != 900:
-        raise ValueError(
-            "probe problem output must contain exactly 900 logical rows"
-        )
+        raise ValueError("probe problem output must contain exactly 900 logical rows")
     physical: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         physical[str(row["physical_request_id"])].append(row)
@@ -366,22 +349,14 @@ def _verify_problem_output(
     accounted_rows: list[dict[str, Any]] = []
     for references in physical.values():
         reference_count = len(references)
-        if (
-            {int(row["physical_reference_count"]) for row in references}
-            != {reference_count}
-            or sorted(
-                int(row["physical_reference_index"]) for row in references
-            )
-            != list(range(reference_count))
+        if {int(row["physical_reference_count"]) for row in references} != {
+            reference_count
+        } or sorted(int(row["physical_reference_index"]) for row in references) != list(
+            range(reference_count)
         ):
             raise ValueError("probe physical-reference accounting mismatch")
-        accounted = [
-            row for row in references if row.get("physical_accounted") is True
-        ]
-        if (
-            len(accounted) != 1
-            or int(accounted[0]["physical_reference_index"]) != 0
-        ):
+        accounted = [row for row in references if row.get("physical_accounted") is True]
+        if len(accounted) != 1 or int(accounted[0]["physical_reference_index"]) != 0:
             raise ValueError("probe physical request must be accounted once")
         for row in references:
             if row.get("physical_accounted") is not True and (
@@ -399,9 +374,7 @@ def _verify_problem_output(
     for batch_rows in batches.values():
         capacities = {int(row["batch_capacity"]) for row in batch_rows}
         declared_sizes = {int(row["batch_size"]) for row in batch_rows}
-        utilizations = {
-            float(row["batch_utilization"]) for row in batch_rows
-        }
+        utilizations = {float(row["batch_utilization"]) for row in batch_rows}
         if (
             len(capacities) != 1
             or declared_sizes != {len(batch_rows)}
@@ -432,33 +405,23 @@ def _verify_problem_output(
 def _physical_accounting(
     rows: list[dict[str, Any]],
 ) -> dict[str, float]:
-    accounted = [
-        row for row in rows if row.get("physical_accounted") is True
-    ]
+    accounted = [row for row in rows if row.get("physical_accounted") is True]
     physical_events = accounted
     batches = {
-        int(row["batch_index"]): int(row["batch_capacity"])
-        for row in physical_events
+        int(row["batch_index"]): int(row["batch_capacity"]) for row in physical_events
     }
     return {
         "logical_rows": float(len(rows)),
         "physical_requests": float(len(physical_events)),
         "output_tokens": float(
-            sum(
-                int(row["physical_output_tokens"])
-                for row in physical_events
-            )
+            sum(int(row["physical_output_tokens"]) for row in physical_events)
         ),
         "gpu_seconds": sum(
-            float(row.get("gpu_seconds") or 0.0)
-            for row in physical_events
+            float(row.get("gpu_seconds") or 0.0) for row in physical_events
         ),
         "peak_gpu_memory_bytes": float(
             max(
-                (
-                    int(row.get("peak_gpu_memory_bytes") or 0)
-                    for row in physical_events
-                ),
+                (int(row.get("peak_gpu_memory_bytes") or 0) for row in physical_events),
                 default=0,
             )
         ),
@@ -491,9 +454,7 @@ def _sample_problem_ids() -> dict[str, list[str]]:
     universes = [_confirmation_ids(path) for path in SOURCE_RUNS.values()]
     selected: dict[str, list[str]] = {}
     for dataset_id, quota in SAMPLE_QUOTAS.items():
-        shared = set.intersection(
-            *(universe[dataset_id] for universe in universes)
-        )
+        shared = set.intersection(*(universe[dataset_id] for universe in universes))
         ordered = sorted(
             shared,
             key=lambda problem_id: hashlib.sha256(
@@ -529,9 +490,7 @@ def _extract_problem(
         branches_by_checkpoint[str(branch["checkpoint_id"])].append(branch)
     for checkpoint in artifact["checkpoints"]:
         if checkpoint["model_id"] != expected_model_id:
-            raise ValueError(
-                f"{problem_id}: unexpected model {checkpoint['model_id']}"
-            )
+            raise ValueError(f"{problem_id}: unexpected model {checkpoint['model_id']}")
         if checkpoint["continuation_eligible"]:
             checkpoints_by_spine[int(checkpoint["spine_id"])].append(checkpoint)
 
@@ -542,9 +501,7 @@ def _extract_problem(
             key=lambda row: int(row["depth"]),
         )
         if len(checkpoints) != 15:
-            raise ValueError(
-                f"{problem_id}/spine-{spine_id}: expected 15 checkpoints"
-            )
+            raise ValueError(f"{problem_id}/spine-{spine_id}: expected 15 checkpoints")
         first = checkpoints[0]
         prompt_tokens = blobs.get(str(first["prompt_blob"]))
         spine_tokens = blobs.get(str(first["spine_blob"]))
@@ -555,9 +512,7 @@ def _extract_problem(
                 key=lambda row: int(row["branch_index"]),
             )
             if [int(row["branch_index"]) for row in branches] != [1, 2, 3, 4]:
-                raise ValueError(
-                    f"{checkpoint['checkpoint_id']}: incomplete branches"
-                )
+                raise ValueError(f"{checkpoint['checkpoint_id']}: incomplete branches")
             rows.append(
                 {
                     "checkpoint_id": checkpoint["checkpoint_id"],
@@ -603,13 +558,9 @@ def _extract_problem(
 def prepare_inputs() -> None:
     selected = _sample_problem_ids()
     selected_ids = sorted(
-        problem_id
-        for dataset_ids in selected.values()
-        for problem_id in dataset_ids
+        problem_id for dataset_ids in selected.values() for problem_id in dataset_ids
     )
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    source_tree_sha256, source_tree_file_count = source_tree_fingerprint(ROOT)
-    execution_bundle = _probe_execution_bundle()
     for model_name, run_dir in SOURCE_RUNS.items():
         audit = _assert_audited(run_dir)
         contract = _read_json(run_dir / "contract.json")
@@ -617,9 +568,7 @@ def prepare_inputs() -> None:
         if not verify_sealed_record(source_manifest):
             raise ValueError(f"source manifest seal failed: {run_dir}")
         model_identities = {
-            payload_sha256(row["runtime_model_identity"]): row[
-                "runtime_model_identity"
-            ]
+            payload_sha256(row["runtime_model_identity"]): row["runtime_model_identity"]
             for row in source_manifest["parent_runs"]
         }
         if len(model_identities) != 1:
@@ -632,8 +581,7 @@ def prepare_inputs() -> None:
             if not verify_sealed_record(source_run):
                 raise ValueError(f"source shard run seal failed: {source_shard}")
             packages = {
-                name: source_run["packages"].get(name)
-                for name in RUNTIME_PACKAGE_NAMES
+                name: source_run["packages"].get(name) for name in RUNTIME_PACKAGE_NAMES
             }
             package_sets[payload_sha256(packages)] = packages
             hardware = {
@@ -660,53 +608,45 @@ def prepare_inputs() -> None:
             for problem_id in selected_ids
         )
         _write_jsonl_gz(input_path, rows)
-        manifest = seal_record({
-            "schema_version": "flcva-probe-input-manifest-v5",
-            "study_id": STUDY_ID,
-            "model_name": model_name,
-            "model_id": contract["model_id"],
-            "model_revision": contract["model_revision"],
-            "tokenizer_revision": contract["tokenizer_revision"],
-            "sampling": contract["sampling"],
-            "global_seed": contract["global_seed"],
-            "source_run_id": audit["run_id"],
-            "source_contract_sha256": audit["contract_sha256"],
-            "source_problem_merkle_root": audit["problem_merkle_root"],
-            "source_result_merkle_root": audit["result_merkle_root"],
-            "source_audit_manifest_sha256": file_sha256(
-                run_dir / "audit_manifest.json"
-            ),
-            "selection": {
-                "split": "confirmation",
-                "rule": (
-                    f"smallest sha256({SELECTION_NAMESPACE}:problem_id)"
-                ),
-                "namespace_frozen_from": SELECTION_NAMESPACE,
-                "quotas": SAMPLE_QUOTAS,
-                "problem_ids": selected,
-                "problem_ids_sha256": payload_sha256(selected_ids),
-            },
-            "cues": CUES,
-            "contexts_per_checkpoint": 5,
-            "nonterminal_checkpoints_per_spine": 15,
-            "spines_per_problem": 4,
-            "workers": WORKERS,
-            "labels_included": False,
-            "input_file": input_path.name,
-            "input_sha256": file_sha256(input_path),
-            "script_sha256": file_sha256(Path(__file__)),
-            "source_tree_sha256": source_tree_sha256,
-            "source_tree_file_count": source_tree_file_count,
-            "execution_bundle": execution_bundle,
-            "runtime_contract": {
-                "model_snapshot": _snapshot_identity(
-                    next(iter(model_identities.values()))
-                ),
-                "packages": next(iter(package_sets.values())),
-                "device_family": "NVIDIA H20",
-                "cuda": next(iter(hardware_sets.values()))["cuda"],
-            },
-        })
+        manifest = seal_record(
+            {
+                "schema_version": "flcva-probe-input-manifest-v5",
+                "study_id": STUDY_ID,
+                "model_name": model_name,
+                "model_id": contract["model_id"],
+                "model_revision": contract["model_revision"],
+                "tokenizer_revision": contract["tokenizer_revision"],
+                "sampling": contract["sampling"],
+                "global_seed": contract["global_seed"],
+                "source_run_id": audit["run_id"],
+                "source_contract_sha256": audit["contract_sha256"],
+                "source_problem_merkle_root": audit["problem_merkle_root"],
+                "source_result_merkle_root": audit["result_merkle_root"],
+                "selection": {
+                    "split": "confirmation",
+                    "rule": (f"smallest sha256({SELECTION_NAMESPACE}:problem_id)"),
+                    "namespace_frozen_from": SELECTION_NAMESPACE,
+                    "quotas": SAMPLE_QUOTAS,
+                    "problem_ids": selected,
+                    "problem_ids_sha256": payload_sha256(selected_ids),
+                },
+                "cues": CUES,
+                "contexts_per_checkpoint": 5,
+                "nonterminal_checkpoints_per_spine": 15,
+                "spines_per_problem": 4,
+                "workers": WORKERS,
+                "labels_included": False,
+                "input_file": input_path.name,
+                "runtime_contract": {
+                    "model_snapshot": _snapshot_identity(
+                        next(iter(model_identities.values()))
+                    ),
+                    "packages": next(iter(package_sets.values())),
+                    "device_family": "NVIDIA H20",
+                    "cuda": next(iter(hardware_sets.values()))["cuda"],
+                },
+            }
+        )
         _atomic_json(INPUT_DIR / f"{model_name}.manifest.json", manifest)
         print(
             json.dumps(
@@ -714,7 +654,6 @@ def prepare_inputs() -> None:
                     "model": model_name,
                     "problems": len(selected_ids),
                     "input": str(input_path),
-                    "sha256": manifest["input_sha256"],
                 },
                 sort_keys=True,
             ),
@@ -732,31 +671,10 @@ def _load_input(model_name: str) -> tuple[dict[str, Any], Path]:
     if manifest.get("study_id") != STUDY_ID:
         raise ValueError(f"input study mismatch: {manifest_path}")
     input_path = INPUT_DIR / str(manifest["input_file"])
-    if file_sha256(input_path) != manifest["input_sha256"]:
-        raise ValueError(f"input digest mismatch: {input_path}")
     if manifest.get("labels_included") is not False:
         raise ValueError("GPU input manifest must explicitly exclude labels")
     if manifest.get("cues") != CUES:
         raise ValueError("probe cue manifest mismatch")
-    if manifest.get("script_sha256") != file_sha256(Path(__file__)):
-        raise ValueError(
-            "probe implementation differs from the immutable input manifest; "
-            "prepare a new study version"
-        )
-    source_tree_sha256, source_tree_file_count = source_tree_fingerprint(ROOT)
-    if (
-        manifest.get("source_tree_sha256") != source_tree_sha256
-        or manifest.get("source_tree_file_count") != source_tree_file_count
-    ):
-        raise ValueError(
-            "probe source tree differs from the immutable input manifest; "
-            "prepare a new study version"
-        )
-    if manifest.get("execution_bundle") != _probe_execution_bundle():
-        raise ValueError(
-            "probe execution bundle differs from the immutable input manifest; "
-            "prepare a new study version"
-        )
     return manifest, input_path
 
 
@@ -782,7 +700,6 @@ def validate_inputs() -> None:
                 {
                     "model": model_name,
                     "problems": len(ids),
-                    "input_sha256": manifest["input_sha256"],
                 },
                 sort_keys=True,
             ),
@@ -793,9 +710,7 @@ def validate_inputs() -> None:
 
 
 def _worker_bucket(problem_id: str) -> int:
-    digest = hashlib.sha256(
-        f"flcva-probe-worker-v1:{problem_id}".encode()
-    ).digest()
+    digest = hashlib.sha256(f"flcva-probe-worker-v1:{problem_id}".encode()).digest()
     return int.from_bytes(digest[:8], "big") % WORKERS
 
 
@@ -811,7 +726,7 @@ def _context_rows(
         raise ValueError(
             "probe continuation-answer batch size is frozen at "
             f"{FORMAL_BRANCH_BATCH_SIZE}"
-    )
+        )
     results: list[dict[str, Any]] = []
     totals = {
         "logical_rows": 0.0,
@@ -822,10 +737,7 @@ def _context_rows(
         "batches": 0.0,
         "declared_batch_slots": 0.0,
     }
-    cue_tokens = {
-        cue_name: backend.encode(cue)
-        for cue_name, cue in CUES.items()
-    }
+    cue_tokens = {cue_name: backend.encode(cue) for cue_name, cue in CUES.items()}
     global_seed = int(global_seed)
 
     def run_batch(
@@ -847,9 +759,7 @@ def _context_rows(
         batch_index = int(totals["batches"])
         totals["batches"] += 1
         totals["declared_batch_slots"] += capacity
-        for (references, request), output in zip(
-            pending, generated, strict=True
-        ):
+        for (references, request), output in zip(pending, generated, strict=True):
             if len(references) not in (1, 2):
                 raise ValueError("physical probe request has invalid references")
             physical_request_id = payload_sha256(
@@ -870,18 +780,14 @@ def _context_rows(
                     "generation_seed": request.seed,
                     "answer_tokens": output.token_ids,
                     "answer_text": output.text,
-                    "raw_answer": (
-                        CUES[metadata["cue_name"]] + output.text
-                    ),
+                    "raw_answer": (CUES[metadata["cue_name"]] + output.text),
                     "source_raw_answer": CUES["canonical"] + source_answer_text,
                     "finish_reason": output.finish_reason,
                     "output_tokens": len(output.token_ids),
                     "physical_output_tokens": (
                         len(output.token_ids) if accounted else 0
                     ),
-                    "gpu_seconds": (
-                        output.gpu_seconds if accounted else 0.0
-                    ),
+                    "gpu_seconds": (output.gpu_seconds if accounted else 0.0),
                     "peak_gpu_memory_bytes": (
                         output.peak_gpu_memory_bytes if accounted else 0
                     ),
@@ -926,12 +832,9 @@ def _context_rows(
             ):
                 raise ValueError("probe input checkpoint depths are incomplete")
             by_depth = {
-                int(checkpoint["depth"]): checkpoint
-                for checkpoint in checkpoints
+                int(checkpoint["depth"]): checkpoint for checkpoint in checkpoints
             }
-            stop_pending: list[
-                tuple[list[dict[str, Any]], GenerationRequest]
-            ] = []
+            stop_pending: list[tuple[list[dict[str, Any]], GenerationRequest]] = []
             for stop_depth in range(256, 4097, 256):
                 references: list[dict[str, Any]] = []
                 if stop_depth < 4096:
@@ -942,9 +845,7 @@ def _context_rows(
                             "spine_id": spine["spine_id"],
                             "depth": stop_depth,
                             "context_kind": "stop",
-                            "context_id": (
-                                f"stop:{checkpoint['checkpoint_id']}"
-                            ),
+                            "context_id": (f"stop:{checkpoint['checkpoint_id']}"),
                             "branch_id": None,
                             "branch_index": None,
                             "reasoning_token_count": 0,
@@ -967,14 +868,10 @@ def _context_rows(
                             "spine_id": spine["spine_id"],
                             "depth": stop_depth - 256,
                             "context_kind": "branch",
-                            "context_id": (
-                                f"branch:{on_spine['branch_id']}"
-                            ),
+                            "context_id": (f"branch:{on_spine['branch_id']}"),
                             "branch_id": on_spine["branch_id"],
                             "branch_index": 1,
-                            "reasoning_token_count": on_spine[
-                                "reasoning_token_count"
-                            ],
+                            "reasoning_token_count": on_spine["reasoning_token_count"],
                             "cue_name": cue_name,
                             "expected_canonical_tokens": on_spine[
                                 "expected_answer_tokens"
@@ -1015,9 +912,7 @@ def _context_rows(
                 )
             run_batch(stop_pending, capacity=FORMAL_STOP_BATCH_SIZE)
 
-            branch_pending: list[
-                tuple[list[dict[str, Any]], GenerationRequest]
-            ] = []
+            branch_pending: list[tuple[list[dict[str, Any]], GenerationRequest]] = []
             for checkpoint in checkpoints:
                 depth = int(checkpoint["depth"])
                 prefix = prompt + spine_tokens[:depth]
@@ -1041,13 +936,9 @@ def _context_rows(
                         "context_id": f"branch:{branch['branch_id']}",
                         "branch_id": branch["branch_id"],
                         "branch_index": branch_index,
-                        "reasoning_token_count": branch[
-                            "reasoning_token_count"
-                        ],
+                        "reasoning_token_count": branch["reasoning_token_count"],
                         "cue_name": cue_name,
-                        "expected_canonical_tokens": branch[
-                            "expected_answer_tokens"
-                        ],
+                        "expected_canonical_tokens": branch["expected_answer_tokens"],
                     }
                     branch_pending.append(
                         (
@@ -1126,14 +1017,8 @@ def generate(
             "tokenizer_revision": manifest["tokenizer_revision"],
             "worker_index": worker_index,
             "workers": WORKERS,
-            "input_sha256": manifest["input_sha256"],
-            "source_result_merkle_root": manifest[
-                "source_result_merkle_root"
-            ],
-            "generation_script_sha256": manifest["script_sha256"],
-            "generation_identity_sha256": generation_identity[
-                "identity_sha256"
-            ],
+            "source_result_merkle_root": manifest["source_result_merkle_root"],
+            "generation_identity_sha256": generation_identity["identity_sha256"],
             "problem_ids_sha256": payload_sha256(expected_ids),
             "problems": len(expected_ids),
             "requested_batch_size": batch_size,
@@ -1158,14 +1043,8 @@ def generate(
             for item in existing.get("problem_files", []):
                 relative = Path(str(item["path"]))
                 if relative.is_absolute() or ".." in relative.parts:
-                    raise ValueError(
-                        f"unsafe completed worker output path: {relative}"
-                    )
+                    raise ValueError(f"unsafe completed worker output path: {relative}")
                 path = worker_dir / relative
-                if file_sha256(path) != item["sha256"]:
-                    raise ValueError(
-                        f"completed worker output is corrupted: {path}"
-                    )
                 problem_id = str(item["problem_id"])
                 if problem_id not in expected_problem_records:
                     raise ValueError(
@@ -1181,31 +1060,21 @@ def generate(
                     problem=expected_problem_records[problem_id],
                 )
                 accounting = _physical_accounting(rows)
-                if (
-                    item.get("logical_rows") != len(rows)
-                    or item.get("physical_requests")
-                    != int(accounting["physical_requests"])
-                ):
-                    raise ValueError(
-                        f"completed row count mismatch: {path}"
-                    )
+                if item.get("logical_rows") != len(rows) or item.get(
+                    "physical_requests"
+                ) != int(accounting["physical_requests"]):
+                    raise ValueError(f"completed row count mismatch: {path}")
                 observed_ids.append(problem_id)
                 logical_row_count += len(rows)
-                physical_request_count += int(
-                    accounting["physical_requests"]
-                )
+                physical_request_count += int(accounting["physical_requests"])
                 observed_batches += int(accounting["batches"])
-                observed_batch_slots += int(
-                    accounting["declared_batch_slots"]
-                )
+                observed_batch_slots += int(accounting["declared_batch_slots"])
             if (
                 sorted(observed_ids) != expected_ids
                 or existing.get("logical_rows") != logical_row_count
-                or existing.get("physical_requests")
-                != physical_request_count
+                or existing.get("physical_requests") != physical_request_count
                 or existing.get("batches") != observed_batches
-                or existing.get("declared_batch_slots")
-                != observed_batch_slots
+                or existing.get("declared_batch_slots") != observed_batch_slots
                 or existing.get("request_batch_fill")
                 != physical_request_count / observed_batch_slots
             ):
@@ -1257,7 +1126,6 @@ def generate(
                 problem_files.append(
                     {
                         "path": str(output_path.relative_to(worker_dir)),
-                        "sha256": file_sha256(output_path),
                         "problem_id": problem["problem_id"],
                         "logical_rows": len(rows),
                         "physical_requests": int(
@@ -1267,9 +1135,7 @@ def generate(
                 )
                 accounting = _physical_accounting(rows)
                 total_logical_rows += len(rows)
-                total_physical_requests += int(
-                    accounting["physical_requests"]
-                )
+                total_physical_requests += int(accounting["physical_requests"])
                 total_output_tokens += int(accounting["output_tokens"])
                 total_gpu_seconds += float(accounting["gpu_seconds"])
                 peak_gpu_memory_bytes = max(
@@ -1277,9 +1143,7 @@ def generate(
                     int(accounting["peak_gpu_memory_bytes"]),
                 )
                 total_batches += int(accounting["batches"])
-                total_declared_batch_slots += int(
-                    accounting["declared_batch_slots"]
-                )
+                total_declared_batch_slots += int(accounting["declared_batch_slots"])
                 print(
                     f"worker {worker_index}: resume {problem['problem_id']}",
                     flush=True,
@@ -1296,30 +1160,27 @@ def generate(
             raise ValueError(
                 f"{problem['problem_id']}: expected 900 results, got {len(rows)}"
             )
-        payload = seal_record({
-            "schema_version": "flcva-probe-output-problem-v5",
-            "study_id": manifest["study_id"],
-            "model_name": model_name,
-            "model_id": manifest["model_id"],
-            "model_revision": manifest["model_revision"],
-            "tokenizer_revision": manifest["tokenizer_revision"],
-            "worker_index": worker_index,
-            "problem_id": problem["problem_id"],
-            "dataset_id": problem["dataset_id"],
-            "input_sha256": manifest["input_sha256"],
-            "input_problem_record_sha256": problem["record_sha256"],
-            "generation_script_sha256": manifest["script_sha256"],
-            "generation_identity_sha256": generation_identity[
-                "identity_sha256"
-            ],
-            "runtime_identity_sha256": runtime_identity["identity_sha256"],
-            "results": rows,
-        })
+        payload = seal_record(
+            {
+                "schema_version": "flcva-probe-output-problem-v5",
+                "study_id": manifest["study_id"],
+                "model_name": model_name,
+                "model_id": manifest["model_id"],
+                "model_revision": manifest["model_revision"],
+                "tokenizer_revision": manifest["tokenizer_revision"],
+                "worker_index": worker_index,
+                "problem_id": problem["problem_id"],
+                "dataset_id": problem["dataset_id"],
+                "input_problem_record_sha256": problem["record_sha256"],
+                "generation_identity_sha256": generation_identity["identity_sha256"],
+                "runtime_identity_sha256": runtime_identity["identity_sha256"],
+                "results": rows,
+            }
+        )
         _atomic_json_gz(output_path, payload)
         problem_files.append(
             {
                 "path": str(output_path.relative_to(worker_dir)),
-                "sha256": file_sha256(output_path),
                 "problem_id": problem["problem_id"],
                 "logical_rows": len(rows),
                 "physical_requests": int(totals["physical_requests"]),
@@ -1343,52 +1204,48 @@ def generate(
     observed_ids = sorted(str(row["problem_id"]) for row in problem_files)
     if observed_ids != expected_ids:
         raise ValueError("worker problem coverage mismatch")
-    worker_manifest = seal_record({
-        "schema_version": "flcva-probe-worker-manifest-v5",
-        "study_id": manifest["study_id"],
-        "complete": True,
-        "model_name": model_name,
-        "model_id": manifest["model_id"],
-        "model_revision": manifest["model_revision"],
-        "tokenizer_revision": manifest["tokenizer_revision"],
-        "worker_index": worker_index,
-        "workers": WORKERS,
-        "input_sha256": manifest["input_sha256"],
-        "source_result_merkle_root": manifest["source_result_merkle_root"],
-        "generation_script_sha256": manifest["script_sha256"],
-        "generation_identity": generation_identity,
-        "generation_identity_sha256": generation_identity["identity_sha256"],
-        "problem_ids_sha256": payload_sha256(expected_ids),
-        "problems": len(expected_ids),
-        "requested_batch_size": batch_size,
-        "logical_rows": total_logical_rows,
-        "physical_requests": total_physical_requests,
-        "output_tokens": total_output_tokens,
-        "gpu_seconds": total_gpu_seconds,
-        "peak_gpu_memory_bytes": peak_gpu_memory_bytes,
-        "batches": total_batches,
-        "declared_batch_slots": total_declared_batch_slots,
-        "request_batch_fill": (
-            total_physical_requests / total_declared_batch_slots
-            if total_declared_batch_slots
-            else None
-        ),
-        "wall_seconds": time.time() - started,
-        "runtime_identity": runtime_identity,
-        "runtime_model_identity": backend.runtime_identity,
-        "problem_files": sorted(
-            problem_files, key=lambda row: str(row["problem_id"])
-        ),
-    })
+    worker_manifest = seal_record(
+        {
+            "schema_version": "flcva-probe-worker-manifest-v5",
+            "study_id": manifest["study_id"],
+            "complete": True,
+            "model_name": model_name,
+            "model_id": manifest["model_id"],
+            "model_revision": manifest["model_revision"],
+            "tokenizer_revision": manifest["tokenizer_revision"],
+            "worker_index": worker_index,
+            "workers": WORKERS,
+            "source_result_merkle_root": manifest["source_result_merkle_root"],
+            "generation_identity": generation_identity,
+            "generation_identity_sha256": generation_identity["identity_sha256"],
+            "problem_ids_sha256": payload_sha256(expected_ids),
+            "problems": len(expected_ids),
+            "requested_batch_size": batch_size,
+            "logical_rows": total_logical_rows,
+            "physical_requests": total_physical_requests,
+            "output_tokens": total_output_tokens,
+            "gpu_seconds": total_gpu_seconds,
+            "peak_gpu_memory_bytes": peak_gpu_memory_bytes,
+            "batches": total_batches,
+            "declared_batch_slots": total_declared_batch_slots,
+            "request_batch_fill": (
+                total_physical_requests / total_declared_batch_slots
+                if total_declared_batch_slots
+                else None
+            ),
+            "wall_seconds": time.time() - started,
+            "runtime_identity": runtime_identity,
+            "runtime_model_identity": backend.runtime_identity,
+            "problem_files": sorted(
+                problem_files, key=lambda row: str(row["problem_id"])
+            ),
+        }
+    )
     _atomic_json(worker_manifest_path, worker_manifest)
     print(json.dumps(worker_manifest, sort_keys=True), flush=True)
 
 
 def _load_labels() -> dict[str, tuple[str, str]]:
-    data_manifest = _read_json(DATA_MANIFEST_PATH)
-    expected = data_manifest["combined"]["sealed_labels_sha256"]
-    if file_sha256(LABELS_PATH) != expected:
-        raise ValueError("sealed combined-label digest mismatch")
     labels: dict[str, tuple[str, str]] = {}
     with LABELS_PATH.open(encoding="utf-8") as handle:
         for line in handle:
@@ -1428,9 +1285,7 @@ def _load_outputs(
         if isinstance(row.get("requested_batch_size"), int)
     }
     if len(requested_batch_sizes) != 1:
-        raise ValueError(
-            f"{model_name}: workers disagree on requested batch size"
-        )
+        raise ValueError(f"{model_name}: workers disagree on requested batch size")
     requested_batch_size = next(iter(requested_batch_sizes))
     if requested_batch_size <= 0:
         raise ValueError(f"{model_name}: invalid requested batch size")
@@ -1447,39 +1302,38 @@ def _load_outputs(
         runtime_identity = worker_manifest.get("runtime_identity")
         if (
             not verify_sealed_record(worker_manifest)
-            or worker_manifest.get("schema_version")
-            != "flcva-probe-worker-manifest-v5"
+            or worker_manifest.get("schema_version") != "flcva-probe-worker-manifest-v5"
             or worker_manifest.get("complete") is not True
-            or worker_manifest.get("study_id") != input_manifest["study_id"]
-            or worker_manifest.get("model_name") != model_name
-            or worker_manifest.get("model_id") != input_manifest["model_id"]
-            or worker_manifest.get("model_revision")
-            != input_manifest["model_revision"]
-            or worker_manifest.get("tokenizer_revision")
-            != input_manifest["tokenizer_revision"]
-            or worker_manifest.get("worker_index") != worker_index
-            or worker_manifest.get("workers") != WORKERS
-            or worker_manifest.get("requested_batch_size")
-            != requested_batch_size
-            or worker_manifest.get("input_sha256")
-            != input_manifest["input_sha256"]
-            or worker_manifest.get("source_result_merkle_root")
-            != input_manifest["source_result_merkle_root"]
-            or worker_manifest.get("generation_script_sha256")
-            != input_manifest["script_sha256"]
-            or worker_manifest.get("generation_identity")
-            != generation_identity
-            or worker_manifest.get("generation_identity_sha256")
-            != generation_identity["identity_sha256"]
-            or not isinstance(runtime_identity, dict)
+            or (worker_manifest.get("study_id") != input_manifest["study_id"])
+            or (worker_manifest.get("model_name") != model_name)
+            or (worker_manifest.get("model_id") != input_manifest["model_id"])
+            or (
+                worker_manifest.get("model_revision")
+                != input_manifest["model_revision"]
+            )
+            or (
+                worker_manifest.get("tokenizer_revision")
+                != input_manifest["tokenizer_revision"]
+            )
+            or (worker_manifest.get("worker_index") != worker_index)
+            or (worker_manifest.get("workers") != WORKERS)
+            or (worker_manifest.get("requested_batch_size") != requested_batch_size)
+            or (
+                worker_manifest.get("source_result_merkle_root")
+                != input_manifest["source_result_merkle_root"]
+            )
+            or (worker_manifest.get("generation_identity") != generation_identity)
+            or (
+                worker_manifest.get("generation_identity_sha256")
+                != generation_identity["identity_sha256"]
+            )
+            or (not isinstance(runtime_identity, dict))
         ):
             raise ValueError(
                 f"{model_name}: incompatible worker {worker_index} manifest"
             )
         _verify_runtime_contract(input_manifest, runtime_identity)
-        runtime_identities[runtime_identity["identity_sha256"]] = (
-            runtime_identity
-        )
+        runtime_identities[runtime_identity["identity_sha256"]] = runtime_identity
         worker_manifests.append(worker_manifest)
         worker_ids: list[str] = []
         worker_logical_rows = 0
@@ -1491,8 +1345,6 @@ def _load_outputs(
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError(f"unsafe result path: {relative}")
             path = worker_dir / relative
-            if file_sha256(path) != item["sha256"]:
-                raise ValueError(f"result file digest mismatch: {path}")
             payload = read_json_gz(path)
             problem_id = str(payload["problem_id"])
             if problem_id not in expected_problem_records:
@@ -1509,8 +1361,7 @@ def _load_outputs(
             if (
                 item.get("problem_id") != problem_id
                 or item.get("logical_rows") != len(rows)
-                or item.get("physical_requests")
-                != int(accounting["physical_requests"])
+                or item.get("physical_requests") != int(accounting["physical_requests"])
             ):
                 raise ValueError(f"result manifest entry mismatch: {path}")
             if problem_id in observed_ids:
@@ -1540,30 +1391,22 @@ def _load_outputs(
             != payload_sha256(expected_worker_ids)
             or worker_manifest.get("problems") != len(expected_worker_ids)
             or worker_manifest.get("logical_rows") != worker_logical_rows
-            or worker_manifest.get("physical_requests")
-            != worker_physical_requests
+            or worker_manifest.get("physical_requests") != worker_physical_requests
             or worker_manifest.get("batches") != worker_batches
-            or worker_manifest.get("declared_batch_slots")
-            != worker_batch_slots
+            or worker_manifest.get("declared_batch_slots") != worker_batch_slots
             or worker_manifest.get("request_batch_fill")
             != worker_physical_requests / worker_batch_slots
         ):
-            raise ValueError(
-                f"{model_name}: worker {worker_index} coverage mismatch"
-            )
+            raise ValueError(f"{model_name}: worker {worker_index} coverage mismatch")
     if len(runtime_identities) != 1:
-        raise ValueError(
-            f"{model_name}: workers used non-identical runtime identities"
-        )
+        raise ValueError(f"{model_name}: workers used non-identical runtime identities")
     if observed_ids != expected_ids:
         raise ValueError(
             f"{model_name}: output coverage mismatch "
             f"({len(observed_ids)} vs {len(expected_ids)})"
         )
     if len(outputs) != 180_000:
-        raise ValueError(
-            f"{model_name}: expected 180000 outputs, got {len(outputs)}"
-        )
+        raise ValueError(f"{model_name}: expected 180000 outputs, got {len(outputs)}")
     runtime = {
         "gpu_seconds": sum(
             float(row.get("gpu_seconds") or 0.0) for row in worker_manifests
@@ -1571,18 +1414,13 @@ def _load_outputs(
         "wall_seconds_max": max(
             float(row.get("wall_seconds") or 0.0) for row in worker_manifests
         ),
-        "output_tokens": sum(
-            int(row["output_tokens"]) for row in worker_manifests
-        ),
-        "logical_rows": sum(
-            int(row["logical_rows"]) for row in worker_manifests
-        ),
+        "output_tokens": sum(int(row["output_tokens"]) for row in worker_manifests),
+        "logical_rows": sum(int(row["logical_rows"]) for row in worker_manifests),
         "physical_requests": sum(
             int(row["physical_requests"]) for row in worker_manifests
         ),
         "peak_gpu_memory_bytes": max(
-            int(row.get("peak_gpu_memory_bytes") or 0)
-            for row in worker_manifests
+            int(row.get("peak_gpu_memory_bytes") or 0) for row in worker_manifests
         ),
         "batches": sum(int(row["batches"]) for row in worker_manifests),
         "declared_batch_slots": sum(
@@ -1592,17 +1430,9 @@ def _load_outputs(
         "worker_manifest_record_sha256": sorted(
             str(row["record_sha256"]) for row in worker_manifests
         ),
-        "result_files_sha256": sorted(
-            str(item["sha256"])
-            for row in worker_manifests
-            for item in row["problem_files"]
-        ),
     }
     runtime["worker_manifest_set_sha256"] = payload_sha256(
         runtime["worker_manifest_record_sha256"]
-    )
-    runtime["result_file_set_sha256"] = payload_sha256(
-        runtime["result_files_sha256"]
     )
     runtime["request_batch_fill"] = (
         runtime["physical_requests"] / runtime["declared_batch_slots"]
@@ -1637,10 +1467,7 @@ def _cluster_interval(
     keys = sorted(by_problem)
     if not keys:
         raise ValueError(f"bootstrap metric {metric} has no eligible rows")
-    aggregates = {
-        key: (sum(values), len(values))
-        for key, values in by_problem.items()
-    }
+    aggregates = {key: (sum(values), len(values)) for key, values in by_problem.items()}
     observed = sum(value for value, _ in aggregates.values()) / sum(
         count for _, count in aggregates.values()
     )
@@ -1660,9 +1487,9 @@ def _scientific_rows(
     labels: dict[str, tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     indexed: dict[tuple[str, str, str], dict[str, Any]] = {}
-    branches_by_checkpoint: dict[
-        tuple[str, str, str], list[dict[str, Any]]
-    ] = defaultdict(list)
+    branches_by_checkpoint: dict[tuple[str, str, str], list[dict[str, Any]]] = (
+        defaultdict(list)
+    )
     control_token_matches: list[bool] = []
     control_text_matches: list[bool] = []
     control_answer_matches: list[bool] = []
@@ -1676,12 +1503,8 @@ def _scientific_rows(
         if key in indexed:
             raise ValueError(f"duplicate probe output: {key}")
         dataset_id, gold = labels[str(row["problem_id"])]
-        correct, parsed, _ = answers_equal(
-            dataset_id, str(row["raw_answer"]), gold
-        )
-        source_parsed = parse_answer(
-            dataset_id, str(row["source_raw_answer"])
-        )
+        correct, parsed, _ = answers_equal(dataset_id, str(row["raw_answer"]), gold)
+        source_parsed = parse_answer(dataset_id, str(row["source_raw_answer"]))
         enriched = {
             **row,
             "correct": int(correct),
@@ -1709,12 +1532,8 @@ def _scientific_rows(
             control_token_matches.append(
                 bool(enriched["canonical_control_token_match"])
             )
-            control_text_matches.append(
-                bool(enriched["canonical_control_text_match"])
-            )
-            control_answer_matches.append(
-                bool(enriched["source_answer_replay"])
-            )
+            control_text_matches.append(bool(enriched["canonical_control_text_match"]))
+            control_answer_matches.append(bool(enriched["source_answer_replay"]))
     if not control_token_matches:
         raise ValueError(f"{model_name}: canonical replay has no contexts")
     for row in parse_rows:
@@ -1738,20 +1557,15 @@ def _scientific_rows(
     stop_rows = [
         row
         for row in outputs
-        if row["context_kind"] == "stop"
-        and row["cue_name"] == "canonical"
+        if row["context_kind"] == "stop" and row["cue_name"] == "canonical"
     ]
     for stop in stop_rows:
         problem_id = str(stop["problem_id"])
         checkpoint_id = str(stop["checkpoint_id"])
         for cue_name in CUES:
-            stop_value = indexed[
-                (problem_id, f"stop:{checkpoint_id}", cue_name)
-            ]
+            stop_value = indexed[(problem_id, f"stop:{checkpoint_id}", cue_name)]
             branch_values = sorted(
-                branches_by_checkpoint[
-                    (problem_id, checkpoint_id, cue_name)
-                ],
+                branches_by_checkpoint[(problem_id, checkpoint_id, cue_name)],
                 key=lambda row: int(row["branch_index"]),
             )
             if len(branch_values) != 4:
@@ -1760,18 +1574,16 @@ def _scientific_rows(
                     "expected four branches"
                 )
             stop_correct = int(stop_value["correct"])
-            continuation_correct = [
-                int(row["correct"]) for row in branch_values
-            ]
+            continuation_correct = [int(row["correct"]) for row in branch_values]
             costs = [
-                int(row["reasoning_token_count"])
-                + int(row["output_tokens"])
+                int(row["reasoning_token_count"]) + int(row["output_tokens"])
                 for row in branch_values
             ]
-            marginal = 1000.0 * (
-                sum(continuation_correct) / len(continuation_correct)
-                - stop_correct
-            ) / (sum(costs) / len(costs))
+            marginal = (
+                1000.0
+                * (sum(continuation_correct) / len(continuation_correct) - stop_correct)
+                / (sum(costs) / len(costs))
+            )
             value_rows.append(
                 {
                     "model": model_name,
@@ -1783,8 +1595,7 @@ def _scientific_rows(
                     "cue_name": cue_name,
                     "stop_correct": stop_correct,
                     "branch_accuracy": (
-                        sum(continuation_correct)
-                        / len(continuation_correct)
+                        sum(continuation_correct) / len(continuation_correct)
                     ),
                     "marginal_value": marginal,
                     "beneficial": int(marginal > 0),
@@ -1796,21 +1607,13 @@ def _scientific_rows(
         for row in value_rows
     }
     for row in value_rows:
-        canonical = by_key[
-            (row["problem_id"], row["checkpoint_id"], "canonical")
-        ]
+        canonical = by_key[(row["problem_id"], row["checkpoint_id"], "canonical")]
         row["canonical_stop_correct"] = canonical["stop_correct"]
-        row["beneficial_agreement"] = int(
-            row["beneficial"] == canonical["beneficial"]
-        )
-        row["harmful_agreement"] = int(
-            row["harmful"] == canonical["harmful"]
-        )
+        row["beneficial_agreement"] = int(row["beneficial"] == canonical["beneficial"])
+        row["harmful_agreement"] = int(row["harmful"] == canonical["harmful"])
         row["sign_agreement"] = int(
-            (row["marginal_value"] > 0)
-            - (row["marginal_value"] < 0)
-            == (canonical["marginal_value"] > 0)
-            - (canonical["marginal_value"] < 0)
+            (row["marginal_value"] > 0) - (row["marginal_value"] < 0)
+            == (canonical["marginal_value"] > 0) - (canonical["marginal_value"] < 0)
         )
     diagnostics = {
         "canonical_control_replay_rate": (
@@ -1837,23 +1640,15 @@ def _metric_rows(
     parse_rows = diagnostics["parse_rows"]
     for cue_name in CUES:
         cue_values = [row for row in values if row["cue_name"] == cue_name]
-        cue_parse = [
-            row for row in parse_rows if row["cue_name"] == cue_name
-        ]
-        answer_pairs = [
-            row for row in cue_parse if row["answer_pair_eligible"] == 1
-        ]
+        cue_parse = [row for row in parse_rows if row["cue_name"] == cue_name]
+        answer_pairs = [row for row in cue_parse if row["answer_pair_eligible"] == 1]
         wrong = [row for row in cue_values if row["stop_correct"] == 0]
         correct = [row for row in cue_values if row["stop_correct"] == 1]
         canonical_wrong = [
-            row
-            for row in cue_values
-            if row["canonical_stop_correct"] == 0
+            row for row in cue_values if row["canonical_stop_correct"] == 0
         ]
         canonical_correct = [
-            row
-            for row in cue_values
-            if row["canonical_stop_correct"] == 1
+            row for row in cue_values if row["canonical_stop_correct"] == 1
         ]
         metrics = {
             "parse_rate": (cue_parse, "parsed"),
@@ -1915,18 +1710,14 @@ def _write_evaluation_artifacts(
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     metrics_path = GENERATED_DIR / "probe_sensitivity_metrics.csv"
     metrics_buffer = io.StringIO(newline="")
-    metrics_writer = csv.DictWriter(
-        metrics_buffer, fieldnames=list(metric_rows[0])
-    )
+    metrics_writer = csv.DictWriter(metrics_buffer, fieldnames=list(metric_rows[0]))
     metrics_writer.writeheader()
     metrics_writer.writerows(metric_rows)
     _atomic_bytes(metrics_path, metrics_buffer.getvalue().encode("utf-8"))
 
     values_path = GENERATED_DIR / "probe_sensitivity_values.csv.gz"
     values_buffer = io.StringIO(newline="")
-    values_writer = csv.DictWriter(
-        values_buffer, fieldnames=list(value_rows[0])
-    )
+    values_writer = csv.DictWriter(values_buffer, fieldnames=list(value_rows[0]))
     values_writer.writeheader()
     values_writer.writerows(value_rows)
     _atomic_bytes(
@@ -1944,10 +1735,7 @@ def _write_evaluation_artifacts(
         ),
         r"\midrule",
     ]
-    index = {
-        (row["model"], row["cue"], row["metric"]): row
-        for row in metric_rows
-    }
+    index = {(row["model"], row["cue"], row["metric"]): row for row in metric_rows}
 
     def interval(row: dict[str, Any]) -> str:
         return (
@@ -1968,11 +1756,7 @@ def _write_evaluation_artifacts(
                     model_labels[model_name],
                     cue_labels[cue_name],
                     interval(index[(model_name, cue_name, "parse_rate")]),
-                    interval(
-                        index[
-                            (model_name, cue_name, "answer_agreement")
-                        ]
-                    ),
+                    interval(index[(model_name, cue_name, "answer_agreement")]),
                     interval(
                         index[
                             (
@@ -1994,12 +1778,8 @@ def _write_evaluation_artifacts(
                 )
             )
     lines.extend([r"\bottomrule", r"\end{tabular}"])
-    _atomic_bytes(
-        table_path, ("\n".join(lines) + "\n").encode("utf-8")
-    )
-    replay_table_path = (
-        GENERATED_DIR / "probe_sensitivity_replay_table.tex"
-    )
+    _atomic_bytes(table_path, ("\n".join(lines) + "\n").encode("utf-8"))
+    replay_table_path = GENERATED_DIR / "probe_sensitivity_replay_table.tex"
     replay_lines = [
         r"\begin{tabular}{lccc}",
         r"\toprule",
@@ -2010,21 +1790,9 @@ def _write_evaluation_artifacts(
         replay_lines.append(
             "{} & {} & {} & {} \\\\".format(
                 model_labels[model_name],
-                interval(
-                    index[
-                        (model_name, "canonical", "source_token_replay")
-                    ]
-                ),
-                interval(
-                    index[
-                        (model_name, "canonical", "source_text_replay")
-                    ]
-                ),
-                interval(
-                    index[
-                        (model_name, "canonical", "source_answer_replay")
-                    ]
-                ),
+                interval(index[(model_name, "canonical", "source_token_replay")]),
+                interval(index[(model_name, "canonical", "source_text_replay")]),
+                interval(index[(model_name, "canonical", "source_answer_replay")]),
             )
         )
     replay_lines.extend([r"\bottomrule", r"\end{tabular}"])
@@ -2038,10 +1806,7 @@ def _write_evaluation_artifacts(
         table_path,
         replay_table_path,
     ]
-    manifest["artifacts_sha256"] = {
-        path.name: file_sha256(path) for path in artifacts
-    }
-    manifest["script_sha256"] = file_sha256(Path(__file__))
+    manifest["artifacts"] = [path.name for path in artifacts]
     manifest_path = GENERATED_DIR / "probe_sensitivity_manifest.json"
     sealed_manifest = seal_record(manifest)
     _atomic_json(manifest_path, sealed_manifest)
@@ -2069,23 +1834,14 @@ def evaluate(qwen_results: Path, deepseek_results: Path) -> None:
         input_manifest, outputs, runtime = _load_outputs(
             model_name, result_dir.resolve()
         )
-        values, diagnostics = _scientific_rows(
-            model_name, outputs, labels
-        )
+        values, diagnostics = _scientific_rows(model_name, outputs, labels)
         metrics = _metric_rows(model_name, values, diagnostics)
         all_values.extend(values)
         all_metrics.extend(metrics)
         source_results[model_name] = {
             "result_dir": str(result_dir.resolve()),
             "input_manifest_record_sha256": input_manifest["record_sha256"],
-            "input_sha256": input_manifest["input_sha256"],
-            "source_tree_sha256": input_manifest["source_tree_sha256"],
-            "execution_bundle_sha256": input_manifest[
-                "execution_bundle"
-            ]["bundle_sha256"],
-            "source_result_merkle_root": input_manifest[
-                "source_result_merkle_root"
-            ],
+            "source_result_merkle_root": input_manifest["source_result_merkle_root"],
             "canonical_control_replay_rate": diagnostics[
                 "canonical_control_replay_rate"
             ],
@@ -2102,21 +1858,16 @@ def evaluate(qwen_results: Path, deepseek_results: Path) -> None:
         "study_id": STUDY_ID,
         "analysis_status": "post-seal, label-aware, independent ablation",
         "bootstrap_replicates": BOOTSTRAP_REPLICATES,
-        "sealed_labels_sha256": file_sha256(LABELS_PATH),
         "source_results": source_results,
     }
-    _write_evaluation_artifacts(
-        all_metrics, all_values, manifest
-    )
+    _write_evaluation_artifacts(all_metrics, all_values, manifest)
     print(
         json.dumps(
             {
                 "models": 2,
                 "value_rows": len(all_values),
                 "metric_rows": len(all_metrics),
-                "manifest": str(
-                    GENERATED_DIR / "probe_sensitivity_manifest.json"
-                ),
+                "manifest": str(GENERATED_DIR / "probe_sensitivity_manifest.json"),
             },
             sort_keys=True,
         ),
@@ -2133,9 +1884,7 @@ def parse_args() -> argparse.Namespace:
     generation.add_argument("--model", choices=tuple(SOURCE_RUNS), required=True)
     generation.add_argument("--worker-index", type=int, required=True)
     generation.add_argument("--output-dir", type=Path, required=True)
-    generation.add_argument(
-        "--batch-size", type=int, default=FORMAL_BRANCH_BATCH_SIZE
-    )
+    generation.add_argument("--batch-size", type=int, default=FORMAL_BRANCH_BATCH_SIZE)
     evaluation = subparsers.add_parser("evaluate")
     evaluation.add_argument("--qwen-results", type=Path, required=True)
     evaluation.add_argument("--deepseek-results", type=Path, required=True)

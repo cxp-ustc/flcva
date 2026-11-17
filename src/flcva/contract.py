@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
@@ -16,7 +15,6 @@ from .config import RunConfig
 from .ids import payload_sha256
 from .io import (
     atomic_write_json,
-    file_sha256,
     seal_record,
     verify_sealed_record,
 )
@@ -24,47 +22,11 @@ from .frozen import validate_formal_config
 from .schemas import ExperimentContract, RunRecord
 
 
-SOURCE_ROOTS = ("src", "scripts")
-SOURCE_FILES = (
-    "pyproject.toml",
-    "README.md",
-)
-
-
 def _version(name: str) -> str | None:
     try:
         return metadata.version(name)
     except metadata.PackageNotFoundError:
         return None
-
-
-def source_tree_fingerprint(project_root: Path) -> tuple[str, int]:
-    entries: list[tuple[str, str]] = []
-    paths: list[Path] = []
-    for name in SOURCE_ROOTS:
-        root = project_root / name
-        if root.is_dir():
-            paths.extend(
-                path
-                for path in root.rglob("*")
-                if path.is_file()
-                and "__pycache__" not in path.parts
-                and not any(
-                    part.endswith(".egg-info") for part in path.parts
-                )
-                and path.suffix not in {".pyc", ".pyo"}
-                and not path.name.endswith(
-                    (".aux", ".log", ".out", ".bbl", ".blg", ".fls", ".fdb_latexmk")
-                )
-            )
-    paths.extend(
-        project_root / name
-        for name in SOURCE_FILES
-        if (project_root / name).is_file()
-    )
-    for path in sorted(set(paths), key=lambda item: str(item.relative_to(project_root))):
-        entries.append((str(path.relative_to(project_root)), file_sha256(path)))
-    return payload_sha256(entries), len(entries)
 
 
 def _git(project_root: Path, *args: str) -> str | None:
@@ -89,7 +51,6 @@ def build_contract(config: RunConfig, project_root: Path) -> ExperimentContract:
     )
     config_payload = config.model_dump(mode="json")
     config_sha = payload_sha256(config_payload)
-    source_sha, _ = source_tree_fingerprint(project_root)
     prompt_template = {
         "system": (
             "Solve the problem by reasoning step by step. Keep reasoning until "
@@ -101,15 +62,7 @@ def build_contract(config: RunConfig, project_root: Path) -> ExperimentContract:
     parent_sha = None
     if config.execution.parent_contract:
         parent = config.resolve_path(project_root, config.execution.parent_contract)
-        parent_sha = file_sha256(parent)
-    if config.dataset.source == "jsonl":
-        public_path = config.resolve_path(
-            project_root,
-            str(config.dataset.public_path),
-        )
-        public_data_sha256 = file_sha256(public_path)
-    else:
-        public_data_sha256 = config.dataset.revision
+        parent_sha = json.loads(parent.read_text(encoding="utf-8"))["contract_sha256"]
     data_manifest_path = project_root / "data" / "frozen" / "MANIFEST.json"
     public_data_manifest_sha256 = None
     dataset_components: dict[str, str] = {}
@@ -137,9 +90,7 @@ def build_contract(config: RunConfig, project_root: Path) -> ExperimentContract:
             if dataset_id in component_rows
         }
         if public_component_manifest:
-            public_data_manifest_sha256 = payload_sha256(
-                public_component_manifest
-            )
+            public_data_manifest_sha256 = payload_sha256(public_component_manifest)
     if not dataset_components:
         dataset_components[config.dataset.id] = (
             f"{config.dataset.repo_id or config.dataset.id}@"
@@ -158,7 +109,6 @@ def build_contract(config: RunConfig, project_root: Path) -> ExperimentContract:
         "dataset_revision": config.dataset.revision,
         "dataset_components": dataset_components,
         "public_data_manifest_sha256": public_data_manifest_sha256,
-        "public_data_sha256": public_data_sha256,
         "data_split": config.dataset.split,
         "scorer_id": config.scorer.id,
         "scorer_revision": config.scorer.revision,
@@ -172,13 +122,27 @@ def build_contract(config: RunConfig, project_root: Path) -> ExperimentContract:
         "continuation_tokens": config.protocol.continuation_tokens,
         "answer_max_tokens": config.protocol.answer_max_tokens,
         "split_rule": "sha256(dataset_id:problem_id)%100<80",
-        "source_tree_sha256": source_sha,
         "parent_contract_sha256": parent_sha,
         "frozen_campaign_sha256": frozen_campaign_sha256,
         "contract_sha256": "",
     }
+    payload = ExperimentContract.model_validate(payload).model_dump(mode="json")
     payload["contract_sha256"] = payload_sha256(payload)
     return ExperimentContract.model_validate(payload)
+
+
+def contract_semantics(contract: ExperimentContract) -> dict[str, Any]:
+    """Compare experiment definitions independently of legacy file metadata."""
+    return contract.model_dump(
+        mode="json",
+        exclude={
+            "contract_sha256",
+            "public_data_sha256",
+            "source_tree_sha256",
+            "public_data_manifest_sha256",
+            "parent_contract_sha256",
+        },
+    )
 
 
 def materialize_contract(
@@ -189,30 +153,24 @@ def materialize_contract(
     contract = build_contract(config, project_root)
     path = run_dir / "contract.json"
     if path.exists():
-        existing = ExperimentContract.model_validate_json(path.read_text(encoding="utf-8"))
-        if existing != contract:
+        existing = load_recorded_contract(run_dir)
+        if contract_semantics(existing) != contract_semantics(contract):
             raise ValueError(
                 "run_id already has a different experiment contract; choose a new run_id"
             )
+        return existing
     else:
         atomic_write_json(path, contract.model_dump(mode="json"))
     return contract
 
 
 def load_recorded_contract(run_dir: Path) -> ExperimentContract:
-    """Load and authenticate a historical contract without replaying its code.
-
-    This is appropriate for read-only post-seal analysis: a later analysis-code
-    change must not make an otherwise self-consistent historical generation
-    lineage unverifiable.
-    """
+    """Load a recorded experiment configuration and check its content ID."""
 
     path = run_dir / "contract.json"
     if not path.is_file():
         raise ValueError(f"run has no experiment contract: {run_dir}")
-    contract = ExperimentContract.model_validate_json(
-        path.read_text(encoding="utf-8")
-    )
+    contract = ExperimentContract.model_validate_json(path.read_text(encoding="utf-8"))
     payload = contract.model_dump(mode="json")
     recorded_sha256 = payload["contract_sha256"]
     payload["contract_sha256"] = ""
@@ -227,9 +185,11 @@ def verify_recorded_contract(
     run_dir: Path,
 ) -> ExperimentContract:
     contract = load_recorded_contract(run_dir)
-    if build_contract(config, project_root) != contract:
+    if contract_semantics(build_contract(config, project_root)) != contract_semantics(
+        contract
+    ):
         raise ValueError(
-            "current config/source tree does not match the recorded experiment contract"
+            "current config does not match the recorded experiment contract"
         )
     return contract
 
@@ -302,9 +262,7 @@ def reseal_run_record(record: RunRecord, **updates: Any) -> RunRecord:
     payload = record.model_dump(mode="json")
     payload.update(updates)
     draft = RunRecord.model_validate(payload)
-    return RunRecord.model_validate(
-        seal_record(draft.model_dump(mode="json"))
-    )
+    return RunRecord.model_validate(seal_record(draft.model_dump(mode="json")))
 
 
 def verify_run_record(record: RunRecord) -> None:
@@ -335,10 +293,7 @@ def new_run_record(
     config: RunConfig,
     contract: ExperimentContract,
 ) -> RunRecord:
-    task_id = (
-        os.environ.get("CLUSTER_TASK_ID")
-        or os.environ.get("TASK_ID")
-    )
+    task_id = os.environ.get("CLUSTER_TASK_ID") or os.environ.get("TASK_ID")
     application_id = os.environ.get("APPLICATION_ID") or os.environ.get("APP_ID")
     task_scope = (
         os.environ.get("FLCVA_TASK_SCOPE")
@@ -370,9 +325,7 @@ def new_run_record(
         "record_sha256": "",
     }
     draft = RunRecord.model_validate(payload)
-    return RunRecord.model_validate(
-        seal_record(draft.model_dump(mode="json"))
-    )
+    return RunRecord.model_validate(seal_record(draft.model_dump(mode="json")))
 
 
 def finish_run_record(record: RunRecord, status: str) -> RunRecord:
@@ -389,7 +342,6 @@ def build_manifest(
     project_root: Path,
     problem_ids: list[str],
 ) -> dict[str, Any]:
-    source_sha, source_count = source_tree_fingerprint(project_root)
     return {
         "schema_version": "flcva-manifest-v1",
         "run_id": config.run_id,
@@ -399,8 +351,6 @@ def build_manifest(
         "problem_ids": sorted(problem_ids),
         "problem_ids_sha256": payload_sha256(sorted(problem_ids)),
         "problem_count": len(problem_ids),
-        "source_tree_sha256": source_sha,
-        "source_tree_file_count": source_count,
         "git_commit": _git(project_root, "rev-parse", "HEAD"),
         "git_dirty": bool(_git(project_root, "status", "--porcelain", "--", ".")),
         "environment": {

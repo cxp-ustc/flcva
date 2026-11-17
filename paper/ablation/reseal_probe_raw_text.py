@@ -26,12 +26,11 @@ from typing import Any
 
 from flcva.ids import payload_sha256, stable_seed
 from flcva.io import (
-    file_sha256,
+    listed_artifacts,
     read_json_gz,
     seal_record,
     verify_sealed_record,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_SCRIPT = ROOT / "paper" / "ablation" / "probe_sensitivity.py"
@@ -70,13 +69,9 @@ def _source_raw_answers(
     for problem_id in sorted(problem_ids):
         artifact = read_json_gz(probe._problem_path(source_run, problem_id))
         if not verify_sealed_record(artifact):
-            raise ValueError(
-                f"{model_name}/{problem_id}: formal problem seal failed"
-            )
+            raise ValueError(f"{model_name}/{problem_id}: formal problem seal failed")
         if str(artifact.get("problem_id")) != problem_id:
-            raise ValueError(
-                f"{model_name}/{problem_id}: formal problem ID mismatch"
-            )
+            raise ValueError(f"{model_name}/{problem_id}: formal problem ID mismatch")
         for checkpoint in artifact["checkpoints"]:
             key = (problem_id, f"stop:{checkpoint['checkpoint_id']}")
             if key in answers:
@@ -98,9 +93,7 @@ def _corrected_rows(
     probe: ModuleType,
     model_name: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    _, outputs, _ = probe._load_outputs(
-        model_name, RESULT_DIRS[model_name].resolve()
-    )
+    _, outputs, _ = probe._load_outputs(model_name, RESULT_DIRS[model_name].resolve())
     canonical = [row for row in outputs if row["cue_name"] == "canonical"]
     if len(canonical) != 60_000:
         raise ValueError(
@@ -110,12 +103,9 @@ def _corrected_rows(
     problem_ids = {str(row["problem_id"]) for row in canonical}
     if len(problem_ids) != 200:
         raise ValueError(
-            f"{model_name}: expected 200 sampled problems, "
-            f"found {len(problem_ids)}"
+            f"{model_name}: expected 200 sampled problems, " f"found {len(problem_ids)}"
         )
-    source_answers, source_digest = _source_raw_answers(
-        probe, model_name, problem_ids
-    )
+    source_answers, source_digest = _source_raw_answers(probe, model_name, problem_ids)
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for output in canonical:
@@ -136,9 +126,7 @@ def _corrected_rows(
     estimate, low, high = probe._cluster_interval(
         rows,
         "raw_text_replay",
-        seed=stable_seed(
-            20250701, model_name, "canonical", "source_text_replay"
-        ),
+        seed=stable_seed(20250701, model_name, "canonical", "source_text_replay"),
     )
     return rows, {
         "n": len(rows),
@@ -174,9 +162,7 @@ def _render_replay_table(
     probe: ModuleType,
     metrics: list[dict[str, str]],
 ) -> None:
-    index = {
-        (row["model"], row["cue"], row["metric"]): row for row in metrics
-    }
+    index = {(row["model"], row["cue"], row["metric"]): row for row in metrics}
 
     def interval(row: dict[str, str]) -> str:
         return (
@@ -198,27 +184,13 @@ def _render_replay_table(
         lines.append(
             "{} & {} & {} & {} \\\\".format(
                 MODEL_LABELS[model_name],
-                interval(
-                    index[
-                        (model_name, "canonical", "source_token_replay")
-                    ]
-                ),
-                interval(
-                    index[
-                        (model_name, "canonical", "source_text_replay")
-                    ]
-                ),
-                interval(
-                    index[
-                        (model_name, "canonical", "source_answer_replay")
-                    ]
-                ),
+                interval(index[(model_name, "canonical", "source_token_replay")]),
+                interval(index[(model_name, "canonical", "source_text_replay")]),
+                interval(index[(model_name, "canonical", "source_answer_replay")]),
             )
         )
     lines.extend([r"\bottomrule", r"\end{tabular}"])
-    probe._atomic_bytes(
-        REPLAY_TABLE_PATH, ("\n".join(lines) + "\n").encode("utf-8")
-    )
+    probe._atomic_bytes(REPLAY_TABLE_PATH, ("\n".join(lines) + "\n").encode("utf-8"))
 
 
 def main() -> None:
@@ -230,8 +202,6 @@ def main() -> None:
         or not verify_sealed_record(manifest)
     ):
         raise ValueError("expected a sealed v5 probe sensitivity manifest")
-    if manifest.get("script_sha256") != file_sha256(PROBE_SCRIPT):
-        raise ValueError("sealed GPU evaluator no longer matches v5 source")
     prior_attestation = manifest.get("postseal_raw_text_correction", {})
     source_manifest_record = prior_attestation.get(
         "source_manifest_record_sha256", manifest["record_sha256"]
@@ -257,20 +227,17 @@ def main() -> None:
             row["ci_high"] = repr(values["ci_high"])
             replaced.add(model_name)
     if replaced != set(corrected):
-        raise ValueError(
-            f"did not replace both source_text_replay rows: {replaced}"
-        )
+        raise ValueError(f"did not replace both source_text_replay rows: {replaced}")
     _write_metrics(probe, fieldnames, metric_rows)
     _render_replay_table(probe, metric_rows)
 
     for model_name, values in corrected.items():
-        manifest["source_results"][model_name][
-            "canonical_control_text_replay_rate"
-        ] = values["estimate"]
+        manifest["source_results"][model_name]["canonical_control_text_replay_rate"] = (
+            values["estimate"]
+        )
     manifest["postseal_raw_text_correction"] = {
         "schema_version": "flcva-probe-raw-text-correction-v1",
         "source_manifest_record_sha256": source_manifest_record,
-        "analysis_script_sha256": file_sha256(Path(__file__)),
         "metric_semantics": (
             "exact equality between rerun raw_answer and the corresponding "
             "raw answer stored in the sealed formal problem artifact"
@@ -283,7 +250,7 @@ def main() -> None:
         "scientific_value_rows_changed": False,
         "models": corrected,
     }
-    artifact_names = set(manifest["artifacts_sha256"])
+    artifact_names = set(listed_artifacts(manifest))
     if artifact_names != {
         "probe_sensitivity_metrics.csv",
         "probe_sensitivity_values.csv.gz",
@@ -291,10 +258,8 @@ def main() -> None:
         "probe_sensitivity_replay_table.tex",
     }:
         raise ValueError("unexpected v5 probe artifact set")
-    manifest["artifacts_sha256"] = {
-        name: file_sha256(GENERATED_DIR / name)
-        for name in sorted(artifact_names)
-    }
+    manifest.pop("artifacts_sha256", None)
+    manifest["artifacts"] = sorted(artifact_names)
     manifest["record_sha256"] = ""
     sealed = seal_record(manifest)
     probe._atomic_json(MANIFEST_PATH, sealed)

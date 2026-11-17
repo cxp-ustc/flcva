@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Render supplementary analyses from the two audited formal v8 runs.
 
-This file intentionally lives under paper/: it reads immutable formal artifacts
-and creates publication assets without changing the source tree fingerprint
-bound into the formal experiment contracts.
+Read recorded formal runs and create tables and figures for the paper.
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ import sympy
 from flcva.config import RunConfig
 from flcva.contract import verify_run_record
 from flcva.ids import stable_seed
-from flcva.io import seal_record, verify_sealed_record
+from flcva.io import require_artifacts, seal_record, verify_sealed_record
 from flcva.replay import (
     _DescendingText,
     _initial_base_cost,
@@ -44,15 +42,12 @@ from flcva.replay import (
 from flcva.schemas import ReplayPoint, RunRecord
 from flcva.statistics import fit_tie_bins, roc_auc
 
-
 ROOT = Path(__file__).resolve().parents[2]
 PAPER = ROOT / "paper"
 OUT = PAPER / "generated"
 RUNS = {
     "Qwen3-8B": ROOT / "artifacts" / "primary-qwen3",
-    "DeepSeek-R1-Distill-Qwen-7B": (
-        ROOT / "artifacts" / "primary-deepseek"
-    ),
+    "DeepSeek-R1-Distill-Qwen-7B": (ROOT / "artifacts" / "primary-deepseek"),
 }
 MODEL_SHORT = {
     "Qwen3-8B": "Qwen3",
@@ -131,14 +126,6 @@ def iter_jsonl_gz(path: Path) -> Iterable[dict[str, Any]]:
                 yield json.loads(line)
 
 
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while block := stream.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def atomic_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -162,14 +149,8 @@ def validate_inputs() -> dict[str, dict[str, Any]]:
     paper_manifest = read_json(OUT / "manifest.json")
     if not verify_sealed_record(paper_manifest):
         raise ValueError("primary paper manifest seal failed")
-    for relative, expected in paper_manifest.get("artifacts_sha256", {}).items():
-        path = Path(relative)
-        target = path if path.is_absolute() else ROOT / path
-        if not target.is_file() or file_sha256(target) != expected:
-            raise ValueError(f"primary paper artifact digest mismatch: {relative}")
-    manifest_runs = {
-        row["run_id"]: row for row in paper_manifest["source_runs"]
-    }
+    require_artifacts(ROOT, paper_manifest)
+    manifest_runs = {row["run_id"]: row for row in paper_manifest["source_runs"]}
     validated: dict[str, dict[str, Any]] = {}
     for model, run_dir in RUNS.items():
         run = read_json(run_dir / "run.json")
@@ -190,18 +171,7 @@ def validate_inputs() -> dict[str, dict[str, Any]]:
             ("evaluation", evaluation),
             ("replay", replay),
         ):
-            artifacts = summary.get("artifacts_sha256")
-            if not isinstance(artifacts, dict) or not artifacts:
-                raise ValueError(
-                    f"{run['run_id']} {subdirectory} artifact tree is absent"
-                )
-            for relative, expected in artifacts.items():
-                path = run_dir / subdirectory / relative
-                if not path.is_file() or file_sha256(path) != expected:
-                    raise ValueError(
-                        f"{run['run_id']} {subdirectory} artifact digest "
-                        f"mismatch: {relative}"
-                    )
+            require_artifacts(run_dir / subdirectory, summary)
         if run["status"] != "sealed":
             raise ValueError(f"{run['run_id']} is not sealed")
         if audit.get("passed") is not True or not all(audit["gates"].values()):
@@ -211,13 +181,6 @@ def validate_inputs() -> dict[str, dict[str, Any]]:
             raise ValueError(f"{run['run_id']} is absent from paper manifest")
         if paper_row["result_merkle_root"] != audit["result_merkle_root"]:
             raise ValueError(f"{run['run_id']} paper Merkle root mismatch")
-        if (
-            paper_row.get("evaluation_summary_sha256")
-            != file_sha256(run_dir / "evaluation" / "summary.json")
-            or paper_row.get("sealed_replay_v1_summary_sha256")
-            != file_sha256(run_dir / "replay" / "summary.json")
-        ):
-            raise ValueError(f"{run['run_id']} paper source digest mismatch")
         if evaluation.get("scientific_results") is not True:
             raise ValueError(f"{run['run_id']} is not a scientific evaluation")
         if replay.get("permutation_oracle", {}).get("replicates") != 1000:
@@ -239,9 +202,6 @@ def load_values(
     evaluation: dict[str, Any],
 ) -> list[dict[str, Any]]:
     path = run_dir / "evaluation" / "values.jsonl.gz"
-    expected = evaluation["artifacts_sha256"].get("values.jsonl.gz")
-    if expected is None or file_sha256(path) != expected:
-        raise ValueError(f"sealed values digest mismatch: {run_dir}")
     rows: list[dict[str, Any]] = []
     for row in iter_jsonl_gz(path):
         rows.append(
@@ -257,10 +217,7 @@ def load_values(
                 "harmful": int(row["harmful"]),
                 "marginal_value": float(row["marginal_value"]),
                 "persistence": row["proxies"].get("persistence"),
-                "proxies": {
-                    proxy: row["proxies"].get(proxy)
-                    for proxy in PROXY_LABELS
-                },
+                "proxies": {proxy: row["proxies"].get(proxy) for proxy in PROXY_LABELS},
                 "spine_id": int(row["spine_id"]),
                 "continuation_correct": tuple(
                     int(value) for value in row["continuation_correct"]
@@ -310,9 +267,7 @@ def oracle_score_maps(
         correct = tuple(int(value) for value in row["continuation_correct"])
         costs = tuple(int(value) for value in row["continuation_costs"])
         if len(correct) != 4 or len(costs) != 4:
-            raise ValueError(
-                f"{checkpoint_id}: expected four continuation outcomes"
-            )
+            raise ValueError(f"{checkpoint_id}: expected four continuation outcomes")
         maps["mixed"][checkpoint_id] = float(row["marginal_value"])
         maps["hindsight_on"][checkpoint_id] = token_normalized_value(
             int(row["stop_correct"]),
@@ -338,16 +293,9 @@ def load_confirmation_frontiers(
     values: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     path = run_dir / "evaluation" / "frontiers.jsonl.gz"
-    expected = evaluation["artifacts_sha256"].get("frontiers.jsonl.gz")
-    if expected is None or file_sha256(path) != expected:
-        raise ValueError(f"sealed frontier digest mismatch: {run_dir}")
-    states = [
-        row for row in iter_jsonl_gz(path) if row["split"] == "confirmation"
-    ]
+    states = [row for row in iter_jsonl_gz(path) if row["split"] == "confirmation"]
     if len(states) != 23_808:
-        raise ValueError(
-            f"expected 23,808 confirmation frontiers, found {len(states)}"
-        )
+        raise ValueError(f"expected 23,808 confirmation frontiers, found {len(states)}")
     by_id = {str(row["checkpoint_id"]): row for row in states}
     if len(by_id) != len(states):
         raise ValueError("confirmation frontier IDs are not unique")
@@ -391,9 +339,7 @@ def leave_one_branch_out_rows(
     for value in values:
         if value["split"] != "confirmation":
             continue
-        outcomes = tuple(
-            int(outcome) for outcome in value["continuation_correct"]
-        )
+        outcomes = tuple(int(outcome) for outcome in value["continuation_correct"])
         if len(outcomes) != 4:
             raise ValueError("leave-one-out analysis requires four branches")
         stop_correct = int(value["stop_correct"])
@@ -412,17 +358,13 @@ def leave_one_branch_out_rows(
                     "checkpoint_id": value["checkpoint_id"],
                     "target": target,
                     "held_out_branch": held_out + 1,
-                    "held_out_role": (
-                        "on_spine" if held_out == 0 else "off_spine"
-                    ),
+                    "held_out_role": ("on_spine" if held_out == 0 else "off_spine"),
                     "label": int(label),
                     "probability": float(probability),
                 }
             )
     if len(rows) != 89_280:
-        raise ValueError(
-            f"expected 89,280 leave-one-out rows, found {len(rows)}"
-        )
+        raise ValueError(f"expected 89,280 leave-one-out rows, found {len(rows)}")
     return rows
 
 
@@ -458,11 +400,7 @@ def _discrete_metrics_from_counts(
             positive, negative = counts[score]
             true_positives += positive
             predicted_positives += positive + negative
-            auprc += (
-                positive
-                / positives
-                * (true_positives / predicted_positives)
-            )
+            auprc += positive / positives * (true_positives / predicted_positives)
     else:
         auprc = None
     squared_error = sum(
@@ -492,9 +430,7 @@ def discrete_problem_bootstrap(
     problem_ids = sorted(by_problem)
     if len(problem_ids) < 2:
         raise ValueError("leave-one-out bootstrap needs multiple problems")
-    observed_counts: dict[float, list[float]] = defaultdict(
-        lambda: [0.0, 0.0]
-    )
+    observed_counts: dict[float, list[float]] = defaultdict(lambda: [0.0, 0.0])
     for problem in by_problem.values():
         for score, pair in problem.items():
             observed_counts[score][0] += pair[0]
@@ -505,12 +441,8 @@ def discrete_problem_bootstrap(
     rng = random.Random(seed)
     samples: dict[str, list[float]] = defaultdict(list)
     for _ in range(BOOTSTRAP_REPLICATES):
-        counts: dict[float, list[float]] = defaultdict(
-            lambda: [0.0, 0.0]
-        )
-        for problem_id in (
-            rng.choice(problem_ids) for _ in problem_ids
-        ):
+        counts: dict[float, list[float]] = defaultdict(lambda: [0.0, 0.0])
+        for problem_id in (rng.choice(problem_ids) for _ in problem_ids):
             for score, pair in by_problem[problem_id].items():
                 counts[score][0] += pair[0]
                 counts[score][1] += pair[1]
@@ -526,14 +458,10 @@ def discrete_problem_bootstrap(
         output[name] = {
             "estimate": estimate,
             "low": (
-                float(np.quantile(metric_samples, 0.025))
-                if metric_samples
-                else None
+                float(np.quantile(metric_samples, 0.025)) if metric_samples else None
             ),
             "high": (
-                float(np.quantile(metric_samples, 0.975))
-                if metric_samples
-                else None
+                float(np.quantile(metric_samples, 0.975)) if metric_samples else None
             ),
             "replicates": len(metric_samples),
         }
@@ -556,9 +484,7 @@ def cluster_ratio_interval(
     values = np.asarray([by_problem[problem_id] for problem_id in problem_ids])
     total_denominator = float(values[:, 1].sum())
     estimate = (
-        float(values[:, 0].sum()) / total_denominator
-        if total_denominator
-        else None
+        float(values[:, 0].sum()) / total_denominator if total_denominator else None
     )
     if not problem_ids or estimate is None:
         return {
@@ -588,9 +514,7 @@ def cluster_contrast_interval(
     low_threshold: float,
     seed_offset: int,
 ) -> dict[str, float | int | None]:
-    by_problem: dict[str, list[float]] = defaultdict(
-        lambda: [0.0, 0.0, 0.0, 0.0]
-    )
+    by_problem: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])
     high_n = 0
     low_n = 0
     for row in rows:
@@ -648,15 +572,10 @@ def fmt_ci(interval: dict[str, Any], *, percent: bool = False) -> str:
     low = scale * float(interval["low"])
     high = scale * float(interval["high"])
     suffix = r"\%" if percent else ""
-    return (
-        f"{estimate:.{digits}f}{suffix} "
-        f"[{low:.{digits}f}, {high:.{digits}f}]"
-    )
+    return f"{estimate:.{digits}f}{suffix} " f"[{low:.{digits}f}, {high:.{digits}f}]"
 
 
-def render_rq1(
-    values_by_model: dict[str, list[dict[str, Any]]]
-) -> list[Path]:
+def render_rq1(values_by_model: dict[str, list[dict[str, Any]]]) -> list[Path]:
     summary_rows: list[dict[str, Any]] = []
     depth_rows: list[dict[str, Any]] = []
     dataset_depth_rows: list[dict[str, Any]] = []
@@ -667,11 +586,7 @@ def render_rq1(
             selected = (
                 confirmation
                 if dataset == "all"
-                else [
-                    row
-                    for row in confirmation
-                    if row["dataset_id"] == dataset
-                ]
+                else [row for row in confirmation if row["dataset_id"] == dataset]
             )
             wrong = [row for row in selected if row["stop_correct"] == 0]
             correct = [row for row in selected if row["stop_correct"] == 1]
@@ -684,9 +599,7 @@ def render_rq1(
             seed_offset += 1
             beneficial_magnitude = cluster_ratio_interval(
                 wrong,
-                lambda row: (
-                    row["marginal_value"] if row["beneficial"] else 0.0
-                ),
+                lambda row: (row["marginal_value"] if row["beneficial"] else 0.0),
                 lambda row: float(row["beneficial"]),
                 seed_offset=seed_offset,
             )
@@ -700,9 +613,7 @@ def render_rq1(
             seed_offset += 1
             harmful_magnitude = cluster_ratio_interval(
                 correct,
-                lambda row: (
-                    -row["marginal_value"] if row["harmful"] else 0.0
-                ),
+                lambda row: (-row["marginal_value"] if row["harmful"] else 0.0),
                 lambda row: float(row["harmful"]),
                 seed_offset=seed_offset,
             )
@@ -712,9 +623,7 @@ def render_rq1(
                     "model": model,
                     "dataset": dataset,
                     "wrong_checkpoints": len(wrong),
-                    "beneficial_events": sum(
-                        row["beneficial"] for row in wrong
-                    ),
+                    "beneficial_events": sum(row["beneficial"] for row in wrong),
                     "beneficial_rate": beneficial["estimate"],
                     "beneficial_rate_low": beneficial["low"],
                     "beneficial_rate_high": beneficial["high"],
@@ -742,10 +651,7 @@ def render_rq1(
                         for row in confirmation
                         if row["stop_correct"] == stop_correct
                         and row["depth"] == depth
-                        and (
-                            dataset == "all"
-                            or row["dataset_id"] == dataset
-                        )
+                        and (dataset == "all" or row["dataset_id"] == dataset)
                     ]
                     if not group:
                         continue
@@ -1124,37 +1030,22 @@ def render_proxy_intervals(
                         "does not reproduce sealed metric"
                     )
                 analysis_prevalence = float(
-                    np.mean(
-                        [
-                            float(row[event_field])
-                            for row in analysis_rows
-                        ]
-                    )
+                    np.mean([float(row[event_field]) for row in analysis_rows])
                 )
                 confirmation_prevalence = float(
-                    np.mean(
-                        [
-                            float(row[event_field])
-                            for row in confirmation_rows
-                        ]
-                    )
+                    np.mean([float(row[event_field]) for row in confirmation_rows])
                 )
                 brier_reference = float(
                     np.mean(
                         [
-                            (
-                                float(row[event_field])
-                                - analysis_prevalence
-                            )
-                            ** 2
+                            (float(row[event_field]) - analysis_prevalence) ** 2
                             for row in confirmation_rows
                         ]
                     )
                 )
                 if confirmation_prevalence <= 0 or brier_reference <= 0:
                     raise ValueError(
-                        f"{model}/{target}/{proxy}: rare-event baseline "
-                        "is undefined"
+                        f"{model}/{target}/{proxy}: rare-event baseline " "is undefined"
                     )
                 rows.append(
                     {
@@ -1172,18 +1063,13 @@ def render_proxy_intervals(
                         "auprc_low": values["auprc_ci"]["low"],
                         "auprc_high": values["auprc_ci"]["high"],
                         "auprc_lift_over_prevalence": (
-                            float(values["auprc"])
-                            / confirmation_prevalence
+                            float(values["auprc"]) / confirmation_prevalence
                         ),
                         "brier": values["brier"],
                         "brier_low": values["brier_ci"]["low"],
                         "brier_high": values["brier_ci"]["high"],
-                        "brier_reference_analysis_climatology": (
-                            brier_reference
-                        ),
-                        "brier_skill": (
-                            1.0 - float(values["brier"]) / brier_reference
-                        ),
+                        "brier_reference_analysis_climatology": (brier_reference),
+                        "brier_skill": (1.0 - float(values["brier"]) / brier_reference),
                     }
                 )
     csv_path = OUT / "proxy_metrics_with_ci.csv"
@@ -1348,9 +1234,7 @@ def render_proxy_intervals(
     return [csv_path, best_path, full_path, rare_path]
 
 
-def render_calibration(
-    validated: dict[str, dict[str, Any]]
-) -> list[Path]:
+def render_calibration(validated: dict[str, dict[str, Any]]) -> list[Path]:
     rows: list[dict[str, Any]] = []
     for model, payload in validated.items():
         for target, proxy_rows in payload["evaluation"]["metrics"].items():
@@ -1468,15 +1352,9 @@ def render_collision(
                     "collision_rate": proxy_values["collision_rate"],
                     "matched_cells": proxy_values["matched_cells"],
                     "beneficial_gap": (
-                        beneficial[0] / beneficial[1]
-                        if beneficial[1]
-                        else None
+                        beneficial[0] / beneficial[1] if beneficial[1] else None
                     ),
-                    "harmful_gap": (
-                        harmful[0] / harmful[1]
-                        if harmful[1]
-                        else None
-                    ),
+                    "harmful_gap": (harmful[0] / harmful[1] if harmful[1] else None),
                     "beneficial_weight": int(beneficial[1]),
                     "harmful_weight": int(harmful[1]),
                 }
@@ -1549,11 +1427,7 @@ def _collision_rate_for_bins(
     include_difficulty: bool = True,
 ) -> dict[str, Any]:
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
-    eligible = [
-        row
-        for row in confirmation
-        if row["proxies"].get(proxy) is not None
-    ]
+    eligible = [row for row in confirmation if row["proxies"].get(proxy) is not None]
     for row in eligible:
         groups[
             (
@@ -1573,10 +1447,7 @@ def _collision_rate_for_bins(
     for group in groups.values():
         stop_correct = int(group[0]["stop_correct"])
         target = "beneficial" if stop_correct == 0 else "harmful"
-        labels = {
-            int(row[target])
-            for row in group
-        }
+        labels = {int(row[target]) for row in group}
         if labels == {0, 1}:
             matched_cells += 1
             collision_ids.update(str(row["checkpoint_id"]) for row in group)
@@ -1599,18 +1470,14 @@ def _collision_rate_for_bins(
         "eligible_checkpoints": len(eligible),
         "matched_cells": matched_cells,
         "collision_members": len(collision_ids),
-        "collision_rate": (
-            len(collision_ids) / len(eligible) if eligible else None
-        ),
+        "collision_rate": (len(collision_ids) / len(eligible) if eligible else None),
         "beneficial_gap": (
-            gap_accumulator["beneficial"][0]
-            / gap_accumulator["beneficial"][1]
+            gap_accumulator["beneficial"][0] / gap_accumulator["beneficial"][1]
             if gap_accumulator["beneficial"][1]
             else None
         ),
         "harmful_gap": (
-            gap_accumulator["harmful"][0]
-            / gap_accumulator["harmful"][1]
+            gap_accumulator["harmful"][0] / gap_accumulator["harmful"][1]
             if gap_accumulator["harmful"][1]
             else None
         ),
@@ -1650,22 +1517,14 @@ def _analysis_orientation(
         and row["proxies"].get(proxy) is not None
     ]
     positives = [
-        float(row["proxies"][proxy])
-        for row in selected
-        if int(row[target]) == 1
+        float(row["proxies"][proxy]) for row in selected if int(row[target]) == 1
     ]
     negatives = [
-        float(row["proxies"][proxy])
-        for row in selected
-        if int(row[target]) == 0
+        float(row["proxies"][proxy]) for row in selected if int(row[target]) == 0
     ]
     if not positives or not negatives:
         raise ValueError(f"cannot orient {proxy}/{target}")
-    return (
-        1.0
-        if float(np.mean(positives)) >= float(np.mean(negatives))
-        else -1.0
-    )
+    return 1.0 if float(np.mean(positives)) >= float(np.mean(negatives)) else -1.0
 
 
 def _conditional_auroc(
@@ -1691,9 +1550,7 @@ def _conditional_auroc(
     effective_strata = 0
     for group in groups.values():
         labels = [int(row[target]) for row in group]
-        scores = [
-            orientation * float(row["proxies"][proxy]) for row in group
-        ]
+        scores = [orientation * float(row["proxies"][proxy]) for row in group]
         positives = sum(labels)
         pairs = positives * (len(labels) - positives)
         auc = roc_auc(labels, scores)
@@ -1704,9 +1561,7 @@ def _conditional_auroc(
         effective_strata += 1
     return {
         "conditional_auroc": (
-            concordant_pairs / comparable_pairs
-            if comparable_pairs
-            else None
+            concordant_pairs / comparable_pairs if comparable_pairs else None
         ),
         "comparable_pairs": comparable_pairs,
         "effective_strata": effective_strata,
@@ -1739,9 +1594,7 @@ def _nearest_neighbor_disagreement(
     for group in groups.values():
         buckets: dict[float, list[dict[str, Any]]] = defaultdict(list)
         for row in group:
-            buckets[
-                orientation * float(row["proxies"][proxy])
-            ].append(row)
+            buckets[orientation * float(row["proxies"][proxy])].append(row)
         values = sorted(buckets)
         for value_index, value in enumerate(values):
             bucket = buckets[value]
@@ -1814,10 +1667,7 @@ def _nearest_neighbor_disagreement(
                 float(np.median(distances)) if distances else None
             ),
         },
-        {
-            problem_id: (value[0], value[1])
-            for problem_id, value in per_problem.items()
-        },
+        {problem_id: (value[0], value[1]) for problem_id, value in per_problem.items()},
     )
 
 
@@ -1844,9 +1694,8 @@ def _binary_entropy_bits(labels: list[int]) -> float:
     probability = sum(labels) / len(labels)
     if probability <= 0.0 or probability >= 1.0:
         return 0.0
-    return (
-        -probability * math.log2(probability)
-        - (1.0 - probability) * math.log2(1.0 - probability)
+    return -probability * math.log2(probability) - (1.0 - probability) * math.log2(
+        1.0 - probability
     )
 
 
@@ -1861,8 +1710,7 @@ def _plugin_conditional_entropy(
         groups[key(row)].append(int(row[target]))
     total = len(rows)
     return sum(
-        len(labels) / total * _binary_entropy_bits(labels)
-        for labels in groups.values()
+        len(labels) / total * _binary_entropy_bits(labels) for labels in groups.values()
     )
 
 
@@ -1884,14 +1732,10 @@ def _incremental_cross_entropy(
         bins.assign(float(row["proxies"][proxy])),
     )
     analysis_available = [
-        row
-        for row in analysis
-        if row["proxies"].get(proxy) is not None
+        row for row in analysis if row["proxies"].get(proxy) is not None
     ]
     confirmation_available = [
-        row
-        for row in confirmation
-        if row["proxies"].get(proxy) is not None
+        row for row in confirmation if row["proxies"].get(proxy) is not None
     ]
     baseline_probabilities = _jeffreys_probability_map(
         analysis_available,
@@ -1903,14 +1747,12 @@ def _incremental_cross_entropy(
         target=target,
         key=proxy_key,
     )
-    global_probability = (
-        sum(int(row[target]) for row in analysis_available) + 0.5
-    ) / (len(analysis_available) + 1.0)
+    global_probability = (sum(int(row[target]) for row in analysis_available) + 0.5) / (
+        len(analysis_available) + 1.0
+    )
     baseline_losses: list[float] = []
     augmented_losses: list[float] = []
-    per_problem: dict[str, list[float]] = defaultdict(
-        lambda: [0.0, 0.0]
-    )
+    per_problem: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
     fallback_cells = 0
     for row in confirmation_available:
         label = int(row[target])
@@ -1961,15 +1803,10 @@ def _incremental_cross_entropy(
             ),
             "plugin_conditional_entropy_bits": plugin_baseline,
             "plugin_proxy_conditional_entropy_bits": plugin_augmented,
-            "plugin_entropy_reduction_bits": (
-                plugin_baseline - plugin_augmented
-            ),
+            "plugin_entropy_reduction_bits": (plugin_baseline - plugin_augmented),
             "augmented_fallback_rows": fallback_cells,
         },
-        {
-            problem_id: (value[0], value[1])
-            for problem_id, value in per_problem.items()
-        },
+        {problem_id: (value[0], value[1]) for problem_id, value in per_problem.items()},
     )
 
 
@@ -2007,9 +1844,7 @@ def render_collision_robustness(
     deletion_information_rows: list[dict[str, Any]] = []
     for model, all_rows in values_by_model.items():
         analysis = [row for row in all_rows if row["split"] == "analysis"]
-        confirmation = [
-            row for row in all_rows if row["split"] == "confirmation"
-        ]
+        confirmation = [row for row in all_rows if row["split"] == "confirmation"]
         for proxy in PROXY_LABELS:
             for max_bins in (5, 10, 20, 50):
                 bins = _proxy_bins(analysis, proxy, max_bins)
@@ -2066,9 +1901,7 @@ def render_collision_robustness(
                 ("harmful", 1),
             ):
                 target_analysis = [
-                    row
-                    for row in analysis
-                    if int(row["stop_correct"]) == stop_correct
+                    row for row in analysis if int(row["stop_correct"]) == stop_correct
                 ]
                 target_confirmation = [
                     row
@@ -2087,22 +1920,18 @@ def render_collision_robustness(
                     target=target,
                     orientation=orientation,
                 )
-                nearest, nearest_contributions = (
-                    _nearest_neighbor_disagreement(
-                        target_confirmation,
-                        proxy=proxy,
-                        target=target,
-                        orientation=orientation,
-                    )
+                nearest, nearest_contributions = _nearest_neighbor_disagreement(
+                    target_confirmation,
+                    proxy=proxy,
+                    target=target,
+                    orientation=orientation,
                 )
-                information, information_contributions = (
-                    _incremental_cross_entropy(
-                        target_analysis,
-                        target_confirmation,
-                        proxy=proxy,
-                        target=target,
-                        bins=bins,
-                    )
+                information, information_contributions = _incremental_cross_entropy(
+                    target_analysis,
+                    target_confirmation,
+                    proxy=proxy,
+                    target=target,
+                    bins=bins,
                 )
                 nn_low, nn_high = _cluster_ratio_bootstrap(
                     nearest_contributions,
@@ -2155,18 +1984,14 @@ def render_collision_robustness(
                 )
                 nn_without_low, nn_without_high = _cluster_ratio_bootstrap(
                     nearest_without_contributions,
-                    namespace=(
-                        f"{model}/{proxy}/{target}/nn/no-difficulty"
-                    ),
+                    namespace=(f"{model}/{proxy}/{target}/nn/no-difficulty"),
                 )
                 (
                     reduction_without_low,
                     reduction_without_high,
                 ) = _cluster_ratio_bootstrap(
                     information_without_contributions,
-                    namespace=(
-                        f"{model}/{proxy}/{target}/logloss/no-difficulty"
-                    ),
+                    namespace=(f"{model}/{proxy}/{target}/logloss/no-difficulty"),
                 )
                 deletion_information_rows.append(
                     {
@@ -2200,12 +2025,8 @@ def render_collision_robustness(
                         "without_difficulty_nn_disagreement_rate": (
                             nearest_without["nn_disagreement_rate"]
                         ),
-                        "without_difficulty_nn_disagreement_low": (
-                            nn_without_low
-                        ),
-                        "without_difficulty_nn_disagreement_high": (
-                            nn_without_high
-                        ),
+                        "without_difficulty_nn_disagreement_low": (nn_without_low),
+                        "without_difficulty_nn_disagreement_high": (nn_without_high),
                         "with_difficulty_nn_eligible": nearest["nn_eligible"],
                         "without_difficulty_nn_eligible": (
                             nearest_without["nn_eligible"]
@@ -2213,16 +2034,12 @@ def render_collision_robustness(
                         "with_difficulty_cross_entropy_reduction_bits": (
                             information["cross_entropy_reduction_bits"]
                         ),
-                        "with_difficulty_cross_entropy_reduction_low": (
-                            reduction_low
-                        ),
+                        "with_difficulty_cross_entropy_reduction_low": (reduction_low),
                         "with_difficulty_cross_entropy_reduction_high": (
                             reduction_high
                         ),
                         "without_difficulty_cross_entropy_reduction_bits": (
-                            information_without[
-                                "cross_entropy_reduction_bits"
-                            ]
+                            information_without["cross_entropy_reduction_bits"]
                         ),
                         "without_difficulty_cross_entropy_reduction_low": (
                             reduction_without_low
@@ -2369,9 +2186,7 @@ def render_collision_robustness(
             r"\multicolumn{2}{c}{Harmful $\Delta M_s$} \\"
         ),
         r"\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}",
-        (
-            r" & & $+D$ & $-D$ & $+D$ & $-D$ & $+D$ & $-D$ \\"
-        ),
+        (r" & & $+D$ & $-D$ & $+D$ & $-D$ & $+D$ & $-D$ \\"),
         r"\midrule",
     ]
     for model in RUNS:
@@ -2386,10 +2201,8 @@ def render_collision_robustness(
                 "{:+.3f} & {:+.3f} & {:+.3f} \\\\".format(
                     MODEL_SHORT[model],
                     PROXY_LABELS[proxy],
-                    100.0
-                    * float(row["with_difficulty_collision_rate"]),
-                    100.0
-                    * float(row["without_difficulty_collision_rate"]),
+                    100.0 * float(row["with_difficulty_collision_rate"]),
+                    100.0 * float(row["without_difficulty_collision_rate"]),
                     float(row["with_difficulty_beneficial_gap"]),
                     float(row["without_difficulty_beneficial_gap"]),
                     float(row["with_difficulty_harmful_gap"]),
@@ -2417,9 +2230,7 @@ def render_collision_robustness(
             "",
         ]
     )
-    deletion_collision_table_path = (
-        OUT / "difficulty_deletion_collision_table.tex"
-    )
+    deletion_collision_table_path = OUT / "difficulty_deletion_collision_table.tex"
     atomic_text(
         deletion_collision_table_path,
         "\n".join(deletion_collision_table),
@@ -2456,35 +2267,13 @@ def render_collision_robustness(
                         MODEL_SHORT[model],
                         target.capitalize(),
                         PROXY_LABELS[proxy],
+                        float(row["with_difficulty_conditional_auroc"]),
+                        float(row["without_difficulty_conditional_auroc"]),
+                        100.0 * float(row["with_difficulty_nn_disagreement_rate"]),
+                        100.0 * float(row["without_difficulty_nn_disagreement_rate"]),
+                        float(row["with_difficulty_" "cross_entropy_reduction_bits"]),
                         float(
-                            row["with_difficulty_conditional_auroc"]
-                        ),
-                        float(
-                            row["without_difficulty_conditional_auroc"]
-                        ),
-                        100.0
-                        * float(
-                            row[
-                                "with_difficulty_nn_disagreement_rate"
-                            ]
-                        ),
-                        100.0
-                        * float(
-                            row[
-                                "without_difficulty_nn_disagreement_rate"
-                            ]
-                        ),
-                        float(
-                            row[
-                                "with_difficulty_"
-                                "cross_entropy_reduction_bits"
-                            ]
-                        ),
-                        float(
-                            row[
-                                "without_difficulty_"
-                                "cross_entropy_reduction_bits"
-                            ]
+                            row["without_difficulty_" "cross_entropy_reduction_bits"]
                         ),
                     )
                 )
@@ -2509,9 +2298,7 @@ def render_collision_robustness(
             "",
         ]
     )
-    deletion_information_table_path = (
-        OUT / "difficulty_deletion_information_table.tex"
-    )
+    deletion_information_table_path = OUT / "difficulty_deletion_information_table.tex"
     atomic_text(
         deletion_information_table_path,
         "\n".join(deletion_information_table),
@@ -2527,9 +2314,7 @@ def render_collision_robustness(
     deletion_sealed = seal_record(
         {
             "schema_version": DIFFICULTY_DELETION_NAMESPACE,
-            "analysis_status": (
-                "supplementary deletion sensitivity, read-only"
-            ),
+            "analysis_status": ("supplementary deletion sensitivity, read-only"),
             "comparison": {
                 "with_difficulty": [
                     "dataset_id",
@@ -2556,16 +2341,11 @@ def render_collision_robustness(
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "artifacts_sha256": {
-                path.name: file_sha256(path)
-                for path in deletion_artifacts
-            },
+            "artifacts": [path.name for path in deletion_artifacts],
         }
     )
     atomic_text(
@@ -2597,21 +2377,19 @@ def render_collision_robustness(
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "artifacts_sha256": {
-                path.name: file_sha256(path)
+            "artifacts": [
+                path.name
                 for path in (
                     bin_path,
                     information_path,
                     bin_table_path,
                     information_table_path,
                 )
-            },
+            ],
         }
     )
     atomic_text(
@@ -2740,7 +2518,7 @@ def subset_event_probability(
 
 
 def render_k_sensitivity(
-    values_by_model: dict[str, list[dict[str, Any]]]
+    values_by_model: dict[str, list[dict[str, Any]]],
 ) -> list[Path]:
     rows: list[dict[str, Any]] = []
     for model, all_rows in values_by_model.items():
@@ -2790,10 +2568,7 @@ def render_k_sensitivity(
         r"\footnotesize",
         r"\begin{tabular}{llrrr}",
         r"\toprule",
-        (
-            r"Model & Target & $K$ & Expected event rate & "
-            r"Agreement with $K=4$ \\"
-        ),
+        (r"Model & Target & $K$ & Expected event rate & " r"Agreement with $K=4$ \\"),
         r"\midrule",
     ]
     for row in rows:
@@ -2827,7 +2602,7 @@ def render_k_sensitivity(
 
 
 def render_branch_estimands(
-    values_by_model: dict[str, list[dict[str, Any]]]
+    values_by_model: dict[str, list[dict[str, Any]]],
 ) -> list[Path]:
     """Separate a single random transition from four-draw opportunity detection."""
 
@@ -2835,29 +2610,21 @@ def render_branch_estimands(
     distribution_rows: list[dict[str, Any]] = []
     seed_offset = 2200
     for model, all_rows in values_by_model.items():
-        confirmation = [
-            row for row in all_rows if row["split"] == "confirmation"
-        ]
+        confirmation = [row for row in all_rows if row["split"] == "confirmation"]
         for target, stop_correct in (("beneficial", 0), ("harmful", 1)):
             selected = [
-                row
-                for row in confirmation
-                if int(row["stop_correct"]) == stop_correct
+                row for row in confirmation if int(row["stop_correct"]) == stop_correct
             ]
             branch_rows: list[dict[str, Any]] = []
             checkpoint_rows: list[dict[str, Any]] = []
             for row in selected:
-                outcomes = tuple(
-                    int(value) for value in row["continuation_correct"]
-                )
+                outcomes = tuple(int(value) for value in row["continuation_correct"])
                 for branch_index, correct in enumerate(outcomes, start=1):
                     branch_rows.append(
                         {
                             "problem_id": row["problem_id"],
                             "event": (
-                                correct
-                                if target == "beneficial"
-                                else 1 - correct
+                                correct if target == "beneficial" else 1 - correct
                             ),
                             "branch_index": branch_index,
                         }
@@ -3024,12 +2791,8 @@ def render_value_ratio_sensitivity(
             stop_labels: list[int] = []
             for row in selected:
                 stop = int(row["stop_correct"])
-                outcomes = tuple(
-                    int(value) for value in row["continuation_correct"]
-                )
-                costs = tuple(
-                    int(value) for value in row["continuation_costs"]
-                )
+                outcomes = tuple(int(value) for value in row["continuation_correct"])
+                costs = tuple(int(value) for value in row["continuation_costs"])
                 primary = token_normalized_value(stop, outcomes, costs)
                 sealed = float(row["marginal_value"])
                 if not math.isclose(
@@ -3073,9 +2836,7 @@ def render_value_ratio_sensitivity(
                     "split": split,
                     "checkpoints": len(selected),
                     "ratio_of_means_mean": float(primary_array.mean()),
-                    "mean_of_ratios_mean": float(
-                        alternative_array.mean()
-                    ),
+                    "mean_of_ratios_mean": float(alternative_array.mean()),
                     "pearson_correlation": float(
                         np.corrcoef(
                             primary_array,
@@ -3088,13 +2849,10 @@ def render_value_ratio_sensitivity(
                             alternative_ranks,
                         )[0, 1]
                     ),
-                    "sign_agreement": float(
-                        np.mean(primary_sign == alternative_sign)
-                    ),
+                    "sign_agreement": float(np.mean(primary_sign == alternative_sign)),
                     "beneficial_label_agreement": float(
                         np.mean(
-                            (primary_array[wrong] > 0)
-                            == (alternative_array[wrong] > 0)
+                            (primary_array[wrong] > 0) == (alternative_array[wrong] > 0)
                         )
                     ),
                     "harmful_label_agreement": float(
@@ -3103,12 +2861,8 @@ def render_value_ratio_sensitivity(
                             == (alternative_array[correct] < 0)
                         )
                     ),
-                    "mean_absolute_difference": float(
-                        np.mean(np.abs(difference))
-                    ),
-                    "max_absolute_difference": float(
-                        np.max(np.abs(difference))
-                    ),
+                    "mean_absolute_difference": float(np.mean(np.abs(difference))),
+                    "max_absolute_difference": float(np.max(np.abs(difference))),
                 }
             )
 
@@ -3120,10 +2874,7 @@ def render_value_ratio_sensitivity(
         r"\footnotesize",
         r"\begin{tabular}{lrrrr}",
         r"\toprule",
-        (
-            r"Model & Pearson & Spearman & Sign agree. & "
-            r"Mean $|\Delta|$ \\"
-        ),
+        (r"Model & Pearson & Spearman & Sign agree. & " r"Mean $|\Delta|$ \\"),
         r"\midrule",
     ]
     for row in rows:
@@ -3169,29 +2920,16 @@ def render_value_ratio_sensitivity(
                 "tokens under a uniformly sampled continuation branch"
             ),
             "alternative_estimand": (
-                "mean of branch-specific correctness-change-per-logical-"
-                "token ratios"
+                "mean of branch-specific correctness-change-per-logical-" "token ratios"
             ),
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "summary_rows_sha256": hashlib.sha256(
-                json.dumps(
-                    rows,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest(),
-            "artifacts_sha256": {
-                csv_path.name: file_sha256(csv_path),
-                table_path.name: file_sha256(table_path),
-            },
+            "artifacts": [csv_path.name, table_path.name],
         }
     )
     atomic_text(
@@ -3212,9 +2950,7 @@ def _off_spine_permutation(
     include_difficulty: bool = True,
 ) -> dict[str, Any]:
     eligible = [
-        state
-        for state in states
-        if str(state["checkpoint_id"]) in off_spine_values
+        state for state in states if str(state["checkpoint_id"]) in off_spine_values
     ]
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for state in eligible:
@@ -3233,13 +2969,7 @@ def _off_spine_permutation(
         groups[tuple(key)].append(state)
     effective_groups = sum(
         len(group) >= 2
-        and len(
-            {
-                off_spine_values[str(state["checkpoint_id"])]
-                for state in group
-            }
-        )
-        >= 2
+        and len({off_spine_values[str(state["checkpoint_id"])] for state in group}) >= 2
         for group in groups.values()
     )
     observed_curve = _replay_one(
@@ -3258,15 +2988,11 @@ def _off_spine_permutation(
         - round_robin_auc
     )
     differences: list[float] = []
-    for permutation_index in range(
-        config.execution.permutation_replicates
-    ):
+    for permutation_index in range(config.execution.permutation_replicates):
         assigned: dict[str, float] = {}
         for key, group in sorted(groups.items(), key=lambda item: str(item[0])):
             ordered = sorted(group, key=lambda row: row["checkpoint_id"])
-            values = [
-                off_spine_values[str(row["checkpoint_id"])] for row in ordered
-            ]
+            values = [off_spine_values[str(row["checkpoint_id"])] for row in ordered]
             if len(ordered) >= 2 and len(set(values)) >= 2:
                 rng = random.Random(
                     stable_seed(
@@ -3295,12 +3021,9 @@ def _off_spine_permutation(
             overridden_values=assigned,
         )
         differences.append(
-            step_auc(curve, endpoint, start_budget=start_budget)
-            - round_robin_auc
+            step_auc(curve, endpoint, start_budget=start_budget) - round_robin_auc
         )
-    exceedances = sum(
-        difference >= observed_difference for difference in differences
-    )
+    exceedances = sum(difference >= observed_difference for difference in differences)
     array = np.asarray(differences, dtype=float)
     return {
         "schema_version": "flcva-off-spine-permutation-v1",
@@ -3309,20 +3032,12 @@ def _off_spine_permutation(
         "observed_difference": observed_difference,
         "exceedances": exceedances,
         "p_value_corrected": (
-            (exceedances + 1) / (len(differences) + 1)
-            if differences
-            else None
+            (exceedances + 1) / (len(differences) + 1) if differences else None
         ),
         "mean_difference": float(array.mean()) if len(array) else None,
-        "median_difference": (
-            float(np.median(array)) if len(array) else None
-        ),
-        "low": (
-            float(np.quantile(array, 0.025)) if len(array) else None
-        ),
-        "high": (
-            float(np.quantile(array, 0.975)) if len(array) else None
-        ),
+        "median_difference": (float(np.median(array)) if len(array) else None),
+        "low": (float(np.quantile(array, 0.025)) if len(array) else None),
+        "high": (float(np.quantile(array, 0.975)) if len(array) else None),
         "difficulty_included": include_difficulty,
         "strata": (
             [
@@ -3366,9 +3081,7 @@ def render_oracle_decomposition(
                 states,
                 "round_robin",
                 checkpoint_interval=config.protocol.checkpoint_interval,
-                fixed_allotment_tokens=(
-                    config.execution.fixed_allotment_tokens
-                ),
+                fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
             )
         }
         for oracle_name, values in scores.items():
@@ -3376,19 +3089,13 @@ def render_oracle_decomposition(
                 states,
                 "oracle",
                 checkpoint_interval=config.protocol.checkpoint_interval,
-                fixed_allotment_tokens=(
-                    config.execution.fixed_allotment_tokens
-                ),
+                fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                 overridden_values=values,
             )
         start_budget = curves["round_robin"][0].budget
         endpoint = min(curve[-1].budget for curve in curves.values())
-        if (
-            endpoint != int(payload["replay"]["common_endpoint"])
-        ):
-            raise ValueError(
-                f"{model}: oracle decomposition changed the replay domain"
-            )
+        if endpoint != int(payload["replay"]["common_endpoint"]):
+            raise ValueError(f"{model}: oracle decomposition changed the replay domain")
         aulc = {
             name: step_auc(
                 curve,
@@ -3403,9 +3110,7 @@ def render_oracle_decomposition(
             rel_tol=0.0,
             abs_tol=1e-6,
         ):
-            raise ValueError(
-                f"{model}: mixed oracle does not reproduce sealed replay"
-            )
+            raise ValueError(f"{model}: mixed oracle does not reproduce sealed replay")
         round_robin_auc = aulc["round_robin"]
         permutation = _off_spine_permutation(
             states,
@@ -3445,39 +3150,26 @@ def render_oracle_decomposition(
                     ),
                     "aulc": area,
                     "mean_accuracy": area / (endpoint - start_budget),
-                    "aulc_difference_vs_round_robin": (
-                        area - round_robin_auc
-                    ),
+                    "aulc_difference_vs_round_robin": (area - round_robin_auc),
                     "relative_aulc_gain_percent": (
-                        100.0
-                        * (area - round_robin_auc)
-                        / round_robin_auc
+                        100.0 * (area - round_robin_auc) / round_robin_auc
                     ),
                     "final_accuracy": final.accuracy,
                     "start_budget": start_budget,
                     "common_endpoint": endpoint,
                     "off_spine_permutation_replicates": (
-                        permutation["replicates"]
-                        if ordering == "off_spine"
-                        else None
+                        permutation["replicates"] if ordering == "off_spine" else None
                     ),
                     "off_spine_permutation_exceedances": (
-                        permutation["exceedances"]
-                        if ordering == "off_spine"
-                        else None
+                        permutation["exceedances"] if ordering == "off_spine" else None
                     ),
                     "off_spine_permutation_p_value_corrected": (
                         permutation["p_value_corrected"]
                         if ordering == "off_spine"
                         else None
                     ),
-                    (
-                        "off_spine_permutation_"
-                        "p_value_without_difficulty"
-                    ): (
-                        permutation_without_difficulty[
-                            "p_value_corrected"
-                        ]
+                    ("off_spine_permutation_" "p_value_without_difficulty"): (
+                        permutation_without_difficulty["p_value_corrected"]
                         if ordering == "off_spine"
                         else None
                     ),
@@ -3502,22 +3194,12 @@ def render_oracle_decomposition(
         summaries[model] = {
             "run_id": payload["run"]["run_id"],
             "result_merkle_root": payload["audit"]["result_merkle_root"],
-            "frontiers_sha256": payload["evaluation"][
-                "artifacts_sha256"
-            ]["frontiers.jsonl.gz"],
-            "values_sha256": payload["evaluation"][
-                "artifacts_sha256"
-            ]["values.jsonl.gz"],
             "branch1_successor_identity": identity,
             "aulc_start_budget": start_budget,
             "common_endpoint": endpoint,
             "aulc": aulc,
             "relative_aulc_gain_percent": {
-                name: (
-                    100.0
-                    * (area - round_robin_auc)
-                    / round_robin_auc
-                )
+                name: (100.0 * (area - round_robin_auc) / round_robin_auc)
                 for name, area in aulc.items()
             },
             "off_spine_permutation": permutation,
@@ -3550,13 +3232,9 @@ def render_oracle_decomposition(
         r"\midrule",
     ]
     for model in RUNS:
-        for row in [
-            row for row in rows if row["model"] == model
-        ]:
+        for row in [row for row in rows if row["model"] == model]:
             p_value = row["off_spine_permutation_p_value_corrected"]
-            p_value_without = row[
-                "off_spine_permutation_p_value_without_difficulty"
-            ]
+            p_value_without = row["off_spine_permutation_p_value_without_difficulty"]
             tex.append(
                 "{} & {} & {} & {:.3f} & {:+.2f}\\% & {} \\\\".format(
                     MODEL_SHORT[model],
@@ -3652,13 +3330,9 @@ def render_oracle_decomposition(
             "schema_version": "flcva-oracle-decomposition-v1",
             "analysis_status": "supplementary, label-aware, read-only",
             "score_definitions": {
-                "mixed": (
-                    "1000 * (mean(C1..C4) - S) / mean(L1..L4)"
-                ),
+                "mixed": ("1000 * (mean(C1..C4) - S) / mean(L1..L4)"),
                 "hindsight_on": "1000 * (C1 - S) / L1",
-                "off_spine": (
-                    "1000 * (mean(C2..C4) - S) / mean(L2..L4)"
-                ),
+                "off_spine": ("1000 * (mean(C2..C4) - S) / mean(L2..L4)"),
             },
             "replay_outcome": (
                 "the authenticated on-spine successor, identical to branch 1"
@@ -3671,9 +3345,7 @@ def render_oracle_decomposition(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
     )
 
-    row_by_key = {
-        (row["model"], row["ordering"]): row for row in rows
-    }
+    row_by_key = {(row["model"], row["ordering"]): row for row in rows}
     macro_lines = [
         "% Auto-generated from the sealed oracle decomposition.",
     ]
@@ -3686,12 +3358,9 @@ def render_oracle_decomposition(
             ("hindsight_on", "OnOracleGain"),
             ("off_spine", "OffOracleGain"),
         ):
-            gain = row_by_key[(model, ordering)][
-                "relative_aulc_gain_percent"
-            ]
+            gain = row_by_key[(model, ordering)]["relative_aulc_gain_percent"]
             macro_lines.append(
-                f"\\newcommand{{\\{prefix}{suffix}}}"
-                f"{{{gain:+.2f}\\%}}"
+                f"\\newcommand{{\\{prefix}{suffix}}}" f"{{{gain:+.2f}\\%}}"
             )
         p_value = row_by_key[(model, "off_spine")][
             "off_spine_permutation_p_value_corrected"
@@ -3735,9 +3404,7 @@ def render_leave_one_branch_out(
     for model, values in values_by_model.items():
         loo_rows = leave_one_branch_out_rows(values)
         for target in ("beneficial", "harmful"):
-            target_rows = [
-                row for row in loo_rows if row["target"] == target
-            ]
+            target_rows = [row for row in loo_rows if row["target"] == target]
             scopes: list[tuple[str, list[dict[str, Any]]]] = [
                 ("pooled_1_to_4", target_rows)
             ]
@@ -3773,11 +3440,7 @@ def render_leave_one_branch_out(
                         "held_out_role": (
                             "pooled"
                             if scope == "pooled_1_to_4"
-                            else (
-                                "on_spine"
-                                if scope == "held_out_1"
-                                else "off_spine"
-                            )
+                            else ("on_spine" if scope == "held_out_1" else "off_spine")
                         ),
                         "n": len(selected),
                         "event_rate": intervals["event_rate"]["estimate"],
@@ -3891,9 +3554,7 @@ def select_nonmyopic_dp_subsets(
     *,
     model: str,
 ) -> list[list[tuple[str, int]]]:
-    initial = [
-        state for state in states if int(state["depth"]) == 256
-    ]
+    initial = [state for state in states if int(state["depth"]) == 256]
     by_problem: dict[str, list[tuple[str, int]]] = defaultdict(list)
     for state in initial:
         by_problem[str(state["problem_id"])].append(
@@ -3904,8 +3565,7 @@ def select_nonmyopic_dp_subsets(
     needed = NONMYOPIC_DP_SUBSETS * NONMYOPIC_DP_FRONTIERS_PER_SUBSET
     if len(by_problem) < needed:
         raise ValueError(
-            f"DP sampling needs {needed} distinct problems, "
-            f"found {len(by_problem)}"
+            f"DP sampling needs {needed} distinct problems, " f"found {len(by_problem)}"
         )
     ordered_problems = sorted(
         by_problem,
@@ -3918,10 +3578,7 @@ def select_nonmyopic_dp_subsets(
         keys = sorted(
             by_problem[problem_id],
             key=lambda key: hashlib.sha256(
-                (
-                    f"{NONMYOPIC_DP_NAMESPACE}:{model}:"
-                    f"{key[0]}:{key[1]}"
-                ).encode()
+                (f"{NONMYOPIC_DP_NAMESPACE}:{model}:" f"{key[0]}:{key[1]}").encode()
             ).hexdigest(),
         )
         selected.append(keys[0])
@@ -3929,14 +3586,10 @@ def select_nonmyopic_dp_subsets(
         selected[index : index + NONMYOPIC_DP_FRONTIERS_PER_SUBSET]
         for index in range(0, len(selected), NONMYOPIC_DP_FRONTIERS_PER_SUBSET)
     ]
-    if (
-        len(subsets) != NONMYOPIC_DP_SUBSETS
-        or any(
-            len(subset) != NONMYOPIC_DP_FRONTIERS_PER_SUBSET
-            or len({key[0] for key in subset})
-            != NONMYOPIC_DP_FRONTIERS_PER_SUBSET
-            for subset in subsets
-        )
+    if len(subsets) != NONMYOPIC_DP_SUBSETS or any(
+        len(subset) != NONMYOPIC_DP_FRONTIERS_PER_SUBSET
+        or len({key[0] for key in subset}) != NONMYOPIC_DP_FRONTIERS_PER_SUBSET
+        for subset in subsets
     ):
         raise ValueError("invalid deterministic DP subset construction")
     return subsets
@@ -3945,22 +3598,18 @@ def select_nonmyopic_dp_subsets(
 def exact_nonmyopic_aulc(
     chains: list[list[dict[str, Any]]],
 ) -> tuple[float, int, int]:
-    if (
-        len(chains) != NONMYOPIC_DP_FRONTIERS_PER_SUBSET
-        or any(len(chain) != 16 for chain in chains)
+    if len(chains) != NONMYOPIC_DP_FRONTIERS_PER_SUBSET or any(
+        len(chain) != 16 for chain in chains
     ):
         raise ValueError("exact DP expects four complete 16-state chains")
     stop_correct = tuple(
-        tuple(int(state["stop_correct"]) for state in chain)
-        for chain in chains
+        tuple(int(state["stop_correct"]) for state in chain) for chain in chains
     )
     transition_costs = tuple(
-        tuple(int(state["transition_cost"]) for state in chain[:-1])
-        for chain in chains
+        tuple(int(state["transition_cost"]) for state in chain[:-1]) for chain in chains
     )
     if any(
-        int(chain[-1]["terminal"]) != 1
-        or any(cost <= 0 for cost in costs)
+        int(chain[-1]["terminal"]) != 1 or any(cost <= 0 for cost in costs)
         for chain, costs in zip(chains, transition_costs, strict=True)
     ):
         raise ValueError("exact DP received an incomplete or invalid chain")
@@ -3999,9 +3648,7 @@ def _ratio_bootstrap_interval(
     *,
     seed: int,
 ) -> dict[str, float | int]:
-    numerator_values = np.asarray(
-        [float(numerator(row)) for row in rows], dtype=float
-    )
+    numerator_values = np.asarray([float(numerator(row)) for row in rows], dtype=float)
     denominator_values = np.asarray(
         [float(denominator(row)) for row in rows], dtype=float
     )
@@ -4012,12 +3659,7 @@ def _ratio_bootstrap_interval(
         indexes = rng.integers(0, len(rows), size=len(rows))
         sampled_denominator = float(denominator_values[indexes].sum())
         if sampled_denominator > 0:
-            samples.append(
-                float(
-                    numerator_values[indexes].sum()
-                    / sampled_denominator
-                )
-            )
+            samples.append(float(numerator_values[indexes].sum() / sampled_denominator))
     return {
         "estimate": observed,
         "low": float(np.quantile(samples, 0.025)),
@@ -4051,13 +3693,11 @@ def render_nonmyopic_dp(
         )
         all_scores = oracle_score_maps(values_by_model[model])
         subsets = select_nonmyopic_dp_subsets(states, model=model)
-        states_by_key: dict[tuple[str, int], list[dict[str, Any]]] = (
-            defaultdict(list)
-        )
+        states_by_key: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
         for state in states:
-            states_by_key[
-                (str(state["problem_id"]), int(state["spine_id"]))
-            ].append(state)
+            states_by_key[(str(state["problem_id"]), int(state["spine_id"]))].append(
+                state
+            )
         for chain in states_by_key.values():
             chain.sort(key=lambda state: int(state["depth"]))
         selection_payload[model] = {
@@ -4079,24 +3719,17 @@ def render_nonmyopic_dp(
         for subset_index, keys in enumerate(subsets):
             chains = [states_by_key[key] for key in keys]
             if any(
-                [int(state["depth"]) for state in chain]
-                != list(range(256, 4097, 256))
+                [int(state["depth"]) for state in chain] != list(range(256, 4097, 256))
                 for chain in chains
             ):
-                raise ValueError(
-                    f"{model}/subset-{subset_index}: incomplete DP chain"
-                )
-            subset_states = [
-                state for chain in chains for state in chain
-            ]
+                raise ValueError(f"{model}/subset-{subset_index}: incomplete DP chain")
+            subset_states = [state for chain in chains for state in chain]
             curves = {
                 "round_robin": _replay_one(
                     subset_states,
                     "round_robin",
                     checkpoint_interval=config.protocol.checkpoint_interval,
-                    fixed_allotment_tokens=(
-                        config.execution.fixed_allotment_tokens
-                    ),
+                    fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                 )
             }
             score_names = {
@@ -4117,9 +3750,7 @@ def render_nonmyopic_dp(
                     subset_states,
                     "oracle",
                     checkpoint_interval=config.protocol.checkpoint_interval,
-                    fixed_allotment_tokens=(
-                        config.execution.fixed_allotment_tokens
-                    ),
+                    fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                     overridden_values=overrides,
                 )
             start_budget = curves["round_robin"][0].budget
@@ -4139,15 +3770,11 @@ def render_nonmyopic_dp(
                 )
             if dp_aulc + 1e-9 < max(policy_aulc.values()):
                 raise ValueError(
-                    f"{model}/subset-{subset_index}: exact DP is not an upper "
-                    "bound"
+                    f"{model}/subset-{subset_index}: exact DP is not an upper " "bound"
                 )
             policy_aulc["exact_nonmyopic_hindsight"] = dp_aulc
             round_robin_auc = policy_aulc["round_robin"]
-            subset_id = (
-                f"{MODEL_SHORT[model].lower()}-"
-                f"{subset_index:02d}"
-            )
+            subset_id = f"{MODEL_SHORT[model].lower()}-" f"{subset_index:02d}"
             for policy in policy_order:
                 area = policy_aulc[policy]
                 subset_rows.append(
@@ -4163,9 +3790,7 @@ def render_nonmyopic_dp(
                         "aulc_span": dp_span,
                         "mean_accuracy": area / dp_span,
                         "relative_gain_vs_round_robin_percent": (
-                            100.0
-                            * (area - round_robin_auc)
-                            / round_robin_auc
+                            100.0 * (area - round_robin_auc) / round_robin_auc
                         ),
                         "relative_gap_to_dp_percent": (
                             100.0 * (dp_aulc - area) / dp_aulc
@@ -4185,15 +3810,10 @@ def render_nonmyopic_dp(
                 for row in model_rows
                 if row["subset_id"] == subset_id
             }
-            for subset_id in sorted(
-                {row["subset_id"] for row in model_rows}
-            )
+            for subset_id in sorted({row["subset_id"] for row in model_rows})
         }
         for policy in policy_order:
-            selected = [
-                rows_by_policy[policy]
-                for rows_by_policy in by_subset.values()
-            ]
+            selected = [rows_by_policy[policy] for rows_by_policy in by_subset.values()]
             mean_accuracy = _ratio_bootstrap_interval(
                 selected,
                 lambda row: row["aulc"],
@@ -4209,12 +3829,9 @@ def render_nonmyopic_dp(
             gain = _ratio_bootstrap_interval(
                 selected,
                 lambda row: (
-                    row["aulc"]
-                    - by_subset[row["subset_id"]]["round_robin"]["aulc"]
+                    row["aulc"] - by_subset[row["subset_id"]]["round_robin"]["aulc"]
                 ),
-                lambda row: by_subset[row["subset_id"]][
-                    "round_robin"
-                ]["aulc"],
+                lambda row: by_subset[row["subset_id"]]["round_robin"]["aulc"],
                 seed=stable_seed(
                     BOOTSTRAP_SEED,
                     NONMYOPIC_DP_NAMESPACE,
@@ -4226,14 +3843,12 @@ def render_nonmyopic_dp(
             gap = _ratio_bootstrap_interval(
                 selected,
                 lambda row: (
-                    by_subset[row["subset_id"]][
-                        "exact_nonmyopic_hindsight"
-                    ]["aulc"]
+                    by_subset[row["subset_id"]]["exact_nonmyopic_hindsight"]["aulc"]
                     - row["aulc"]
                 ),
-                lambda row: by_subset[row["subset_id"]][
-                    "exact_nonmyopic_hindsight"
-                ]["aulc"],
+                lambda row: by_subset[row["subset_id"]]["exact_nonmyopic_hindsight"][
+                    "aulc"
+                ],
                 seed=stable_seed(
                     BOOTSTRAP_SEED,
                     NONMYOPIC_DP_NAMESPACE,
@@ -4252,9 +3867,7 @@ def render_nonmyopic_dp(
                     "mean_accuracy": mean_accuracy["estimate"],
                     "mean_accuracy_low": mean_accuracy["low"],
                     "mean_accuracy_high": mean_accuracy["high"],
-                    "relative_gain_vs_round_robin_percent": (
-                        100.0 * gain["estimate"]
-                    ),
+                    "relative_gain_vs_round_robin_percent": (100.0 * gain["estimate"]),
                     "relative_gain_low": 100.0 * gain["low"],
                     "relative_gain_high": 100.0 * gain["high"],
                     "relative_gap_to_dp_percent": 100.0 * gap["estimate"],
@@ -4290,9 +3903,7 @@ def render_nonmyopic_dp(
         r"\midrule",
     ]
     for model in RUNS:
-        for row in [
-            row for row in summary_rows if row["model"] == model
-        ]:
+        for row in [row for row in summary_rows if row["model"] == model]:
             tex.append(
                 "{} & {} & {:.3f} & {:+.2f}\\% [{:+.2f}, {:+.2f}] & "
                 "{:.2f}\\% [{:.2f}, {:.2f}] \\\\".format(
@@ -4340,8 +3951,7 @@ def render_nonmyopic_dp(
             "frontiers_per_subset": NONMYOPIC_DP_FRONTIERS_PER_SUBSET,
             "states_per_frontier": 16,
             "distinct_problems_per_model": (
-                NONMYOPIC_DP_SUBSETS
-                * NONMYOPIC_DP_FRONTIERS_PER_SUBSET
+                NONMYOPIC_DP_SUBSETS * NONMYOPIC_DP_FRONTIERS_PER_SUBSET
             ),
             "objective": (
                 "maximize right-continuous full-ledger AULC over every "
@@ -4352,31 +3962,17 @@ def render_nonmyopic_dp(
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
-                    "frontiers_sha256": payload["evaluation"][
-                        "artifacts_sha256"
-                    ]["frontiers.jsonl.gz"],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "summary_rows_sha256": hashlib.sha256(
-                json.dumps(
-                    summary_rows,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest(),
         }
     )
     atomic_text(
         summary_path,
         json.dumps(sealed, indent=2, sort_keys=True) + "\n",
     )
-    summary_by_key = {
-        (row["model"], row["policy"]): row for row in summary_rows
-    }
+    summary_by_key = {(row["model"], row["policy"]): row for row in summary_rows}
     macro_lines = [
         "% Auto-generated from the sealed exact non-myopic DP analysis.",
     ]
@@ -4470,8 +4066,7 @@ def render_replay_policy_assets() -> list[Path]:
             selected = [
                 row
                 for row in point_rows
-                if row["model"] == model
-                and row["scheduler"] == scheduler
+                if row["model"] == model and row["scheduler"] == scheduler
             ]
             selected.sort(key=lambda row: int(row["budget"]))
             axis.plot(
@@ -4524,9 +4119,7 @@ def _replay_one_with_problem_events(
     if len(by_id) != len(states):
         raise ValueError("spine-replicate replay received duplicate checkpoints")
     first_states = [
-        state
-        for state in states
-        if int(state["depth"]) == checkpoint_interval
+        state for state in states if int(state["depth"]) == checkpoint_interval
     ]
     problem_ids = [str(state["problem_id"]) for state in first_states]
     if len(problem_ids) != len(set(problem_ids)):
@@ -4549,9 +4142,7 @@ def _replay_one_with_problem_events(
     action_checkpoint_ids: list[str] = []
     total_frontiers = len(frontiers)
     correct_count = sum(initial_correct.values())
-    active_keys = {
-        key for key, state in frontiers.items() if not state["terminal"]
-    }
+    active_keys = {key for key, state in frontiers.items() if not state["terminal"]}
     active_count = len(active_keys)
     observation_budget = _initial_base_cost(first_states)
     budget = observation_budget
@@ -4581,9 +4172,7 @@ def _replay_one_with_problem_events(
     queue = deque(ordered_keys)
     fixed_key_index = 0
     fixed_remaining = max(1, fixed_allotment_tokens // checkpoint_interval)
-    priority_heap: list[
-        tuple[float, int, _DescendingText, str, tuple[str, int]]
-    ] = []
+    priority_heap: list[tuple[float, int, _DescendingText, str, tuple[str, int]]] = []
 
     def push_priority(key: tuple[str, int]) -> None:
         state = frontiers[key]
@@ -4640,27 +4229,21 @@ def _replay_one_with_problem_events(
                 )
         else:
             while priority_heap:
-                _, _, _, checkpoint_id, candidate = heapq.heappop(
-                    priority_heap
-                )
+                _, _, _, checkpoint_id, candidate = heapq.heappop(priority_heap)
                 if (
                     candidate in active_keys
-                    and str(frontiers[candidate]["checkpoint_id"])
-                    == checkpoint_id
+                    and str(frontiers[candidate]["checkpoint_id"]) == checkpoint_id
                 ):
                     chosen = candidate
                     break
             else:
-                raise ValueError(
-                    "spine-replicate priority heap exhausted"
-                )
+                raise ValueError("spine-replicate priority heap exhausted")
         current = frontiers[chosen]
         action_checkpoint_ids.append(str(current["checkpoint_id"]))
         successor_id = str(current.get("successor_id") or "")
         if successor_id not in by_id:
             raise ValueError(
-                f"spine-replicate successor missing: "
-                f"{current['checkpoint_id']}"
+                f"spine-replicate successor missing: " f"{current['checkpoint_id']}"
             )
         successor = dict(by_id[successor_id])
         budget += _transition_cost(current)
@@ -4712,9 +4295,7 @@ def _assert_replay_equivalent(
                 abs_tol=1e-12,
             )
         ):
-            raise ValueError(
-                "spine-replicate replay diverged from the sealed core"
-            )
+            raise ValueError("spine-replicate replay diverged from the sealed core")
 
 
 def _problem_contributions(
@@ -4794,13 +4375,9 @@ def _build_compact_replay_context(
         if expected_depths is None:
             expected_depths = depths
         elif depths != expected_depths:
-            raise ValueError(
-                f"{problem_id}: compact replay depth lattice mismatch"
-            )
+            raise ValueError(f"{problem_id}: compact replay depth lattice mismatch")
         if len(chain) < 2 or not bool(chain[-1]["terminal"]):
-            raise ValueError(
-                f"{problem_id}: compact replay chain is incomplete"
-            )
+            raise ValueError(f"{problem_id}: compact replay chain is incomplete")
         if any(bool(state["terminal"]) for state in chain[:-1]):
             raise ValueError(
                 f"{problem_id}: compact replay terminates before final state"
@@ -4809,16 +4386,10 @@ def _build_compact_replay_context(
             if str(current.get("successor_id") or "") != str(
                 successor["checkpoint_id"]
             ):
-                raise ValueError(
-                    f"{problem_id}: compact replay successor mismatch"
-                )
+                raise ValueError(f"{problem_id}: compact replay successor mismatch")
         initial_costs.append(_initial_base_cost([chain[0]]))
-        correctness.append(
-            [int(bool(state["stop_correct"])) for state in chain]
-        )
-        transition_costs.append(
-            [_transition_cost(state) for state in chain[:-1]]
-        )
+        correctness.append([int(bool(state["stop_correct"])) for state in chain])
+        transition_costs.append([_transition_cost(state) for state in chain[:-1]])
         for policy, score_map in policy_score_maps.items():
             values: list[float] = []
             for state in chain[:-1]:
@@ -4839,10 +4410,9 @@ def _build_compact_replay_context(
 
     correct_array = np.asarray(correctness, dtype=np.int8)
     transition_array = np.asarray(transition_costs, dtype=np.int64)
-    if (
-        correct_array.ndim != 2
-        or transition_array.shape
-        != (len(problem_ids), correct_array.shape[1] - 1)
+    if correct_array.ndim != 2 or transition_array.shape != (
+        len(problem_ids),
+        correct_array.shape[1] - 1,
     ):
         raise ValueError("compact replay arrays have inconsistent shapes")
     return CompactReplayContext(
@@ -4925,8 +4495,7 @@ def _compact_system_aulc(
                 cost = int(costs[instance, depth])
                 area += cost * correct_count / instances
                 correct_count += int(
-                    correctness[instance, depth + 1]
-                    - correctness[instance, depth]
+                    correctness[instance, depth + 1] - correctness[instance, depth]
                 )
     else:
         if policy not in context.policy_scores:
@@ -4949,8 +4518,7 @@ def _compact_system_aulc(
             cost = int(costs[instance, depth])
             area += cost * correct_count / instances
             correct_count += int(
-                correctness[instance, depth + 1]
-                - correctness[instance, depth]
+                correctness[instance, depth + 1] - correctness[instance, depth]
             )
             next_depth = depth + 1
             if next_depth < transitions:
@@ -5008,31 +4576,20 @@ def _paired_full_replay_bootstrap(
             )
             for policy in policies
         }
-        starts = [
-            int(context.initial_costs[sampled].sum())
-            for context in contexts
-        ]
-        spans = [
-            int(context.transition_costs[sampled].sum())
-            for context in contexts
-        ]
+        starts = [int(context.initial_costs[sampled].sum()) for context in contexts]
+        spans = [int(context.transition_costs[sampled].sum()) for context in contexts]
         return values, {
             "mean_start_budget": float(np.mean(starts)),
             "mean_common_endpoint": float(
                 np.mean(
-                    [
-                        start + span
-                        for start, span in zip(starts, spans, strict=True)
-                    ]
+                    [start + span for start, span in zip(starts, spans, strict=True)]
                 )
             ),
             "mean_budget_span": float(np.mean(spans)),
         }
 
     observed, _ = replay_sample(indexes)
-    samples = {
-        policy: np.empty(replicates, dtype=float) for policy in policies
-    }
+    samples = {policy: np.empty(replicates, dtype=float) for policy in policies}
     rows: list[dict[str, Any]] = []
     rng = np.random.default_rng(
         stable_seed(
@@ -5059,23 +4616,16 @@ def _paired_full_replay_bootstrap(
                 "unique_source_problems": int(len(np.unique(sampled))),
                 **domain,
                 **{
-                    f"{policy}_normalized_aulc": replayed[policy]
-                    for policy in policies
+                    f"{policy}_normalized_aulc": replayed[policy] for policy in policies
                 },
                 "shortcut_gain_vs_round_robin_percent": (
-                    100.0
-                    * (shortcut - round_robin)
-                    / round_robin
+                    100.0 * (shortcut - round_robin) / round_robin
                 ),
                 "two_stage_increment_vs_shortcut_percent": (
-                    100.0
-                    * (replayed["two_stage_ev"] - shortcut)
-                    / shortcut
+                    100.0 * (replayed["two_stage_ev"] - shortcut) / shortcut
                 ),
                 "ridge_increment_vs_shortcut_percent": (
-                    100.0
-                    * (replayed["direct_ridge_m"] - shortcut)
-                    / shortcut
+                    100.0 * (replayed["direct_ridge_m"] - shortcut) / shortcut
                 ),
             }
         )
@@ -5118,11 +4668,7 @@ def render_spine_replicate_replay(
         if spine_ids != [0, 1, 2, 3]:
             raise ValueError(f"{model}: expected spine IDs 0--3")
         model_problems = sorted(
-            {
-                str(state["problem_id"])
-                for state in states
-                if int(state["depth"]) == 256
-            }
+            {str(state["problem_id"]) for state in states if int(state["depth"]) == 256}
         )
         if len(model_problems) != 372:
             raise ValueError(
@@ -5138,24 +4684,12 @@ def render_spine_replicate_replay(
         ] = {}
         domains_by_seed: dict[int, tuple[int, int]] = {}
         for spine_id in spine_ids:
-            selected = [
-                state
-                for state in states
-                if int(state["spine_id"]) == spine_id
-            ]
+            selected = [state for state in states if int(state["spine_id"]) == spine_id]
             if len(selected) != 372 * 16:
-                raise ValueError(
-                    f"{model}/spine-{spine_id}: incomplete state lattice"
-                )
-            initial = [
-                state for state in selected if int(state["depth"]) == 256
-            ]
-            if {
-                str(state["problem_id"]) for state in initial
-            } != set(model_problems):
-                raise ValueError(
-                    f"{model}/spine-{spine_id}: problem universe mismatch"
-                )
+                raise ValueError(f"{model}/spine-{spine_id}: incomplete state lattice")
+            initial = [state for state in selected if int(state["depth"]) == 256]
+            if {str(state["problem_id"]) for state in initial} != set(model_problems):
+                raise ValueError(f"{model}/spine-{spine_id}: problem universe mismatch")
             traces: dict[
                 str,
                 tuple[
@@ -5166,52 +4700,31 @@ def render_spine_replicate_replay(
                 ],
             ] = {}
             for policy, (scheduler, score_name) in policy_specs.items():
-                overrides = (
-                    scores[str(score_name)]
-                    if score_name is not None
-                    else None
-                )
+                overrides = scores[str(score_name)] if score_name is not None else None
                 trace = _replay_one_with_problem_events(
                     selected,
                     scheduler,
-                    checkpoint_interval=(
-                        config.protocol.checkpoint_interval
-                    ),
-                    fixed_allotment_tokens=(
-                        config.execution.fixed_allotment_tokens
-                    ),
+                    checkpoint_interval=(config.protocol.checkpoint_interval),
+                    fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                     overridden_values=overrides,
                 )
                 reference = _replay_one(
                     selected,
                     scheduler,
-                    checkpoint_interval=(
-                        config.protocol.checkpoint_interval
-                    ),
-                    fixed_allotment_tokens=(
-                        config.execution.fixed_allotment_tokens
-                    ),
+                    checkpoint_interval=(config.protocol.checkpoint_interval),
+                    fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                     overridden_values=overrides,
                 )
                 _assert_replay_equivalent(trace[0], reference)
                 equivalence_checks += 1
                 traces[policy] = trace
             start_budget = traces["round_robin"][0][0].budget
-            endpoint = min(
-                trace[0][-1].budget for trace in traces.values()
-            )
-            if any(
-                trace[0][0].budget != start_budget
-                for trace in traces.values()
-            ):
-                raise ValueError(
-                    f"{model}/spine-{spine_id}: start budget mismatch"
-                )
+            endpoint = min(trace[0][-1].budget for trace in traces.values())
+            if any(trace[0][0].budget != start_budget for trace in traces.values()):
+                raise ValueError(f"{model}/spine-{spine_id}: start budget mismatch")
             span = endpoint - start_budget
             if span <= 0:
-                raise ValueError(
-                    f"{model}/spine-{spine_id}: empty replay domain"
-                )
+                raise ValueError(f"{model}/spine-{spine_id}: empty replay domain")
             curves_by_seed[spine_id] = {
                 policy: trace[0] for policy, trace in traces.items()
             }
@@ -5237,20 +4750,10 @@ def render_spine_replicate_replay(
                     endpoint=endpoint,
                 )
                 contribution_mean = float(
-                    np.mean(
-                        [
-                            row["normalized_aulc"]
-                            for row in contributions.values()
-                        ]
-                    )
+                    np.mean([row["normalized_aulc"] for row in contributions.values()])
                 )
                 final_mean = float(
-                    np.mean(
-                        [
-                            row["final_correct"]
-                            for row in contributions.values()
-                        ]
-                    )
+                    np.mean([row["final_correct"] for row in contributions.values()])
                 )
                 if not math.isclose(
                     contribution_mean,
@@ -5282,9 +4785,7 @@ def render_spine_replicate_replay(
                             **row,
                         }
                     )
-            round_robin_mean = seed_metrics["round_robin"][
-                "mean_accuracy"
-            ]
+            round_robin_mean = seed_metrics["round_robin"]["mean_accuracy"]
             for policy, metrics in seed_metrics.items():
                 seed_rows.append(
                     {
@@ -5299,10 +4800,7 @@ def render_spine_replicate_replay(
                         **metrics,
                         "relative_gain_vs_round_robin_percent": (
                             100.0
-                            * (
-                                metrics["mean_accuracy"]
-                                - round_robin_mean
-                            )
+                            * (metrics["mean_accuracy"] - round_robin_mean)
                             / round_robin_mean
                         ),
                     }
@@ -5327,9 +4825,7 @@ def render_spine_replicate_replay(
                         "model": model,
                         "policy": policy,
                         "normalized_budget": normalized_budget,
-                        "mean_problem_accuracy": float(
-                            np.mean(accuracies)
-                        ),
+                        "mean_problem_accuracy": float(np.mean(accuracies)),
                         "min_seed_accuracy": min(accuracies),
                         "max_seed_accuracy": max(accuracies),
                     }
@@ -5347,9 +4843,7 @@ def render_spine_replicate_replay(
         list[dict[str, Any]],
     ] = defaultdict(list)
     for row in problem_rows:
-        problem_index[
-            (row["model"], row["problem_id"], row["policy"])
-        ].append(row)
+        problem_index[(row["model"], row["problem_id"], row["policy"])].append(row)
     clustered: dict[
         tuple[str, str],
         dict[str, dict[str, float]],
@@ -5361,9 +4855,7 @@ def render_spine_replicate_replay(
             2,
             3,
         }:
-            raise ValueError(
-                f"{model}/{problem_id}/{policy}: incomplete spine cluster"
-            )
+            raise ValueError(f"{model}/{problem_id}/{policy}: incomplete spine cluster")
         clustered[(model, problem_id)][policy] = {
             "mean_accuracy": float(
                 np.mean([float(row["normalized_aulc"]) for row in rows])
@@ -5384,27 +4876,21 @@ def render_spine_replicate_replay(
         for policy in policy_specs:
             policy_values = np.asarray(
                 [
-                    clustered[(model, problem_id)][policy][
-                        "mean_accuracy"
-                    ]
+                    clustered[(model, problem_id)][policy]["mean_accuracy"]
                     for problem_id in problem_ids
                 ],
                 dtype=float,
             )
             round_robin_values = np.asarray(
                 [
-                    clustered[(model, problem_id)]["round_robin"][
-                        "mean_accuracy"
-                    ]
+                    clustered[(model, problem_id)]["round_robin"]["mean_accuracy"]
                     for problem_id in problem_ids
                 ],
                 dtype=float,
             )
             final_values = np.asarray(
                 [
-                    clustered[(model, problem_id)][policy][
-                        "final_accuracy"
-                    ]
+                    clustered[(model, problem_id)][policy]["final_accuracy"]
                     for problem_id in problem_ids
                 ],
                 dtype=float,
@@ -5412,9 +4898,7 @@ def render_spine_replicate_replay(
             observed_mean = float(policy_values.mean())
             observed_round_robin = float(round_robin_values.mean())
             observed_gain = (
-                100.0
-                * (observed_mean - observed_round_robin)
-                / observed_round_robin
+                100.0 * (observed_mean - observed_round_robin) / observed_round_robin
             )
             rng = np.random.default_rng(
                 stable_seed(
@@ -5434,18 +4918,12 @@ def render_spine_replicate_replay(
                     size=len(problem_ids),
                 )
                 sampled_mean = float(policy_values[indexes].mean())
-                sampled_round_robin = float(
-                    round_robin_values[indexes].mean()
-                )
+                sampled_round_robin = float(round_robin_values[indexes].mean())
                 boot_mean[replicate] = sampled_mean
                 boot_gain[replicate] = (
-                    100.0
-                    * (sampled_mean - sampled_round_robin)
-                    / sampled_round_robin
+                    100.0 * (sampled_mean - sampled_round_robin) / sampled_round_robin
                 )
-                boot_final[replicate] = float(
-                    final_values[indexes].mean()
-                )
+                boot_final[replicate] = float(final_values[indexes].mean())
             per_seed = [
                 row
                 for row in seed_rows
@@ -5458,23 +4936,13 @@ def render_spine_replicate_replay(
                     "problems": len(problem_ids),
                     "spine_replicates": 4,
                     "mean_problem_accuracy": observed_mean,
-                    "mean_problem_accuracy_low": float(
-                        np.quantile(boot_mean, 0.025)
-                    ),
-                    "mean_problem_accuracy_high": float(
-                        np.quantile(boot_mean, 0.975)
-                    ),
+                    "mean_problem_accuracy_low": float(np.quantile(boot_mean, 0.025)),
+                    "mean_problem_accuracy_high": float(np.quantile(boot_mean, 0.975)),
                     "relative_gain_vs_round_robin_percent": observed_gain,
-                    "relative_gain_low": float(
-                        np.quantile(boot_gain, 0.025)
-                    ),
-                    "relative_gain_high": float(
-                        np.quantile(boot_gain, 0.975)
-                    ),
+                    "relative_gain_low": float(np.quantile(boot_gain, 0.025)),
+                    "relative_gain_high": float(np.quantile(boot_gain, 0.975)),
                     "final_problem_accuracy": float(final_values.mean()),
-                    "final_problem_accuracy_low": float(
-                        np.quantile(boot_final, 0.025)
-                    ),
+                    "final_problem_accuracy_low": float(np.quantile(boot_final, 0.025)),
                     "final_problem_accuracy_high": float(
                         np.quantile(boot_final, 0.975)
                     ),
@@ -5524,11 +4992,7 @@ def render_spine_replicate_replay(
         r"\midrule",
     ]
     for model in RUNS:
-        rows = {
-            row["policy"]: row
-            for row in summary_rows
-            if row["model"] == model
-        }
+        rows = {row["policy"]: row for row in summary_rows if row["model"] == model}
         for policy in displayed:
             row = rows[policy]
             table.append(
@@ -5591,11 +5055,7 @@ def render_spine_replicate_replay(
         r"\midrule",
     ]
     for model in RUNS:
-        rows = {
-            row["policy"]: row
-            for row in summary_rows
-            if row["model"] == model
-        }
+        rows = {row["policy"]: row for row in summary_rows if row["model"] == model}
         for policy in diagnostic_displayed:
             row = rows[policy]
             if policy == "off_spine_myopic":
@@ -5687,9 +5147,7 @@ def render_spine_replicate_replay(
     fig.savefig(figure_path, bbox_inches="tight")
     plt.close(fig)
 
-    summary_by_key = {
-        (row["model"], row["policy"]): row for row in summary_rows
-    }
+    summary_by_key = {(row["model"], row["policy"]): row for row in summary_rows}
     macro_lines = [
         "% Auto-generated from sealed spine-replicate replay.",
     ]
@@ -5734,22 +5192,10 @@ def render_spine_replicate_replay(
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
-                    "frontiers_sha256": payload["evaluation"][
-                        "artifacts_sha256"
-                    ]["frontiers.jsonl.gz"],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "summary_rows_sha256": hashlib.sha256(
-                json.dumps(
-                    summary_rows,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest(),
         }
     )
     atomic_text(
@@ -5782,27 +5228,15 @@ def _transformer_chunk_flops(
     hidden = int(architecture["hidden_size"])
     intermediate = int(architecture["intermediate_size"])
     layers = int(architecture["num_hidden_layers"])
-    query_width = (
-        int(architecture["num_attention_heads"])
-        * int(architecture["head_dim"])
+    query_width = int(architecture["num_attention_heads"]) * int(
+        architecture["head_dim"]
     )
-    kv_width = (
-        int(architecture["num_key_value_heads"])
-        * int(architecture["head_dim"])
-    )
-    projection_per_token = 2.0 * hidden * (
-        query_width + 2 * kv_width + hidden
-    )
+    kv_width = int(architecture["num_key_value_heads"]) * int(architecture["head_dim"])
+    projection_per_token = 2.0 * hidden * (query_width + 2 * kv_width + hidden)
     swiglu_per_token = 6.0 * hidden * intermediate
-    causal_pairs = (
-        new_tokens * past_tokens
-        + new_tokens * (new_tokens + 1) / 2.0
-    )
+    causal_pairs = new_tokens * past_tokens + new_tokens * (new_tokens + 1) / 2.0
     attention = 4.0 * query_width * causal_pairs
-    return layers * (
-        new_tokens * (projection_per_token + swiglu_per_token)
-        + attention
-    )
+    return layers * (new_tokens * (projection_per_token + swiglu_per_token) + attention)
 
 
 def _decode_flops(
@@ -5834,9 +5268,7 @@ def _prm_prefill_flops(
         new_tokens=input_tokens,
         past_tokens=0,
     )
-    reward_head = (
-        4.0 * input_tokens * int(architecture["hidden_size"])
-    )
+    reward_head = 4.0 * input_tokens * int(architecture["hidden_size"])
     return transformer + reward_head
 
 
@@ -5889,9 +5321,7 @@ class _TwoFeatureFit:
         except np.linalg.LinAlgError:
             unconstrained = np.linalg.lstsq(matrix, target, rcond=None)[0]
         if np.all(unconstrained >= 0):
-            candidates.append(
-                (float(unconstrained[0]), float(unconstrained[1]))
-            )
+            candidates.append((float(unconstrained[0]), float(unconstrained[1])))
         if self.s11 > 0:
             candidates.append((max(0.0, self.t1 / self.s11), 0.0))
         if self.s22 > 0:
@@ -5914,18 +5344,12 @@ class _TwoFeatureFit:
             "seconds_per_total_pflop": pooled_beta,
             "pooled_sse": pooled_sse,
             "pooled_r_squared": (
-                1.0 - pooled_sse / centered_total
-                if centered_total > 0
-                else None
+                1.0 - pooled_sse / centered_total if centered_total > 0 else None
             ),
             "seconds_per_prefill_pflop": beta1,
             "seconds_per_decode_pflop": beta2,
             "sse": sse,
-            "r_squared": (
-                1.0 - sse / centered_total
-                if centered_total > 0
-                else None
-            ),
+            "r_squared": (1.0 - sse / centered_total if centered_total > 0 else None),
             "roles": dict(sorted(self.roles.items())),
         }
 
@@ -5961,11 +5385,7 @@ class _OneFeatureFit:
             "seconds_per_pflop_aggregate": self.y / self.x,
             "seconds_per_pflop": beta,
             "sse": sse,
-            "r_squared": (
-                1.0 - sse / centered_total
-                if centered_total > 0
-                else None
-            ),
+            "r_squared": (1.0 - sse / centered_total if centered_total > 0 else None),
         }
 
 
@@ -5981,13 +5401,10 @@ def _physical_event_calibration(
     reasoning_fit = _OneFeatureFit()
     probe_fit = _OneFeatureFit()
     prm_fit = _OneFeatureFit()
-    generation_artifact_digests: list[str] = []
-    scoring_artifact_digests: list[str] = []
     for path in sorted((run_dir / "problems").glob("*.json.gz")):
         artifact = read_json_gz(path)
         if not verify_sealed_record(artifact):
             raise ValueError(f"generation artifact seal failed: {path}")
-        generation_artifact_digests.append(file_sha256(path))
         for event in artifact["ledger"]:
             event_id = str(event["event_id"])
             if event_id in required_event_ids:
@@ -5999,16 +5416,22 @@ def _physical_event_calibration(
             output_tokens = int(event.get("output_tokens") or 0)
             if seconds <= 0 or output_tokens <= 0:
                 continue
-            prefill = _transformer_chunk_flops(
-                generator_architecture,
-                new_tokens=input_tokens,
-                past_tokens=0,
-            ) / 1e15
-            decode = _decode_flops(
-                generator_architecture,
-                output_tokens=output_tokens,
-                past_tokens=input_tokens,
-            ) / 1e15
+            prefill = (
+                _transformer_chunk_flops(
+                    generator_architecture,
+                    new_tokens=input_tokens,
+                    past_tokens=0,
+                )
+                / 1e15
+            )
+            decode = (
+                _decode_flops(
+                    generator_architecture,
+                    output_tokens=output_tokens,
+                    past_tokens=input_tokens,
+                )
+                / 1e15
+            )
             generation_fit.add(
                 prefill,
                 decode,
@@ -6024,14 +5447,11 @@ def _physical_event_calibration(
                 raise ValueError(f"unexpected timed generator role: {role}")
     missing = required_event_ids - set(event_lookup)
     if missing:
-        raise ValueError(
-            f"{len(missing)} required generation events are absent"
-        )
+        raise ValueError(f"{len(missing)} required generation events are absent")
     for path in sorted((run_dir / "scores").glob("*.json.gz")):
         artifact = read_json_gz(path)
         if not verify_sealed_record(artifact):
             raise ValueError(f"score artifact seal failed: {path}")
-        scoring_artifact_digests.append(file_sha256(path))
         for event in artifact["ledger"]:
             seconds = float(event.get("gpu_seconds") or 0.0)
             input_tokens = int(event.get("input_tokens") or 0)
@@ -6050,12 +5470,6 @@ def _physical_event_calibration(
         "generator_reasoning": reasoning_fit.solve(),
         "generator_probe": probe_fit.solve(),
         "prm": prm_fit.solve(),
-        "generation_artifact_set_sha256": hashlib.sha256(
-            "\n".join(generation_artifact_digests).encode()
-        ).hexdigest(),
-        "scoring_artifact_set_sha256": hashlib.sha256(
-            "\n".join(scoring_artifact_digests).encode()
-        ).hexdigest(),
     }
     return event_lookup, calibration
 
@@ -6065,10 +5479,7 @@ def _events_for_state(
     field: str,
     event_lookup: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    return [
-        event_lookup[str(reference["event_id"])]
-        for reference in state[field]
-    ]
+    return [event_lookup[str(reference["event_id"])] for reference in state[field]]
 
 
 def _one_role(
@@ -6094,13 +5505,9 @@ def _state_flop_costs(
     for state in states:
         checkpoint_id = str(state["checkpoint_id"])
         depth = int(state["depth"])
-        prm_tokens = int(
-            (state.get("proxy_costs") or {}).get("prm_min_step", 0)
-        )
+        prm_tokens = int((state.get("proxy_costs") or {}).get("prm_min_step", 0))
         prm_flops = (
-            _prm_prefill_flops(prm_architecture, prm_tokens)
-            if prm_tokens > 0
-            else 0.0
+            _prm_prefill_flops(prm_architecture, prm_tokens) if prm_tokens > 0 else 0.0
         )
         if depth == checkpoint_interval:
             events = _events_for_state(
@@ -6190,9 +5597,7 @@ def _flop_cost_value(
 ) -> float:
     if ledger == "estimated_pflops":
         return (
-            cost.generator_reasoning
-            + cost.generator_probe
-            + cost.prm_prefill
+            cost.generator_reasoning + cost.generator_probe + cost.prm_prefill
         ) / 1e15
     if ledger == "calibrated_h20_seconds":
         reasoning = calibration["generator_reasoning"]
@@ -6202,12 +5607,8 @@ def _flop_cost_value(
             cost.generator_reasoning
             / 1e15
             * float(reasoning["seconds_per_pflop_aggregate"])
-            + cost.generator_probe
-            / 1e15
-            * float(probe["seconds_per_pflop_aggregate"])
-            + cost.prm_prefill
-            / 1e15
-            * float(prm["seconds_per_pflop_aggregate"])
+            + cost.generator_probe / 1e15 * float(probe["seconds_per_pflop_aggregate"])
+            + cost.prm_prefill / 1e15 * float(prm["seconds_per_pflop_aggregate"])
         )
     raise ValueError(f"unsupported cost ledger: {ledger}")
 
@@ -6229,14 +5630,8 @@ def _replay_action_sequence_with_cost(
     dict[str, list[tuple[float, int]]],
 ]:
     by_id = {str(state["checkpoint_id"]): state for state in states}
-    first = [
-        state
-        for state in states
-        if int(state["depth"]) == checkpoint_interval
-    ]
-    frontiers = {
-        str(state["problem_id"]): state for state in first
-    }
+    first = [state for state in states if int(state["depth"]) == checkpoint_interval]
+    frontiers = {str(state["problem_id"]): state for state in first}
     if len(frontiers) != len(first):
         raise ValueError("cost replay requires one frontier per problem")
     initial_correct = {
@@ -6356,14 +5751,8 @@ def _replay_action_sequence_with_budget_map(
     dict[str, list[tuple[float, int]]],
 ]:
     by_id = {str(state["checkpoint_id"]): state for state in states}
-    first = [
-        state
-        for state in states
-        if int(state["depth"]) == checkpoint_interval
-    ]
-    frontiers = {
-        str(state["problem_id"]): state for state in first
-    }
+    first = [state for state in states if int(state["depth"]) == checkpoint_interval]
+    frontiers = {str(state["problem_id"]): state for state in first}
     initial_correct = {
         problem_id: int(bool(state["stop_correct"]))
         for problem_id, state in frontiers.items()
@@ -6441,7 +5830,6 @@ def render_agreement_accounting(
     architectures = architecture_bundle["models"]
     seed_rows: list[dict[str, Any]] = []
     problem_rows: list[dict[str, Any]] = []
-    source_calibration_digests: dict[str, str] = {}
     for model, payload in validated.items():
         config = RunConfig.model_validate(
             read_json(payload["run_dir"] / "manifest.json")["config"]
@@ -6466,13 +5854,6 @@ def render_agreement_accounting(
             prm_architecture=architectures["Qwen2.5-Math-PRM-7B"],
             required_event_ids=required_event_ids,
         )
-        source_calibration_digests[model] = hashlib.sha256(
-            json.dumps(
-                calibration,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
         initial_flops, transition_flops = _state_flop_costs(
             states,
             generator_architecture=architectures[model],
@@ -6489,11 +5870,7 @@ def render_agreement_accounting(
             for state in states
         }
         for spine_id in range(4):
-            primary = [
-                state
-                for state in states
-                if int(state["spine_id"]) == spine_id
-            ]
+            primary = [state for state in states if int(state["spine_id"]) == spine_id]
             rr_logical = _replay_one_with_problem_events(
                 primary,
                 "round_robin",
@@ -6528,9 +5905,7 @@ def render_agreement_accounting(
                 depth = int(state["depth"])
                 logical_parallel_transitions[str(state["checkpoint_id"])] = float(
                     sum(
-                        _transition_cost(
-                            state_index[(problem_id, auxiliary, depth)]
-                        )
+                        _transition_cost(state_index[(problem_id, auxiliary, depth)])
                         for auxiliary in range(4)
                     )
                 )
@@ -6568,9 +5943,7 @@ def render_agreement_accounting(
                     transition_costs=transition_flops,
                     ledger=ledger,
                     calibration=calibration,
-                    prm_architecture=architectures[
-                        "Qwen2.5-Math-PRM-7B"
-                    ],
+                    prm_architecture=architectures["Qwen2.5-Math-PRM-7B"],
                     checkpoint_interval=config.protocol.checkpoint_interval,
                 )
                 free = _replay_action_sequence_with_cost(
@@ -6581,31 +5954,21 @@ def render_agreement_accounting(
                     transition_costs=transition_flops,
                     ledger=ledger,
                     calibration=calibration,
-                    prm_architecture=architectures[
-                        "Qwen2.5-Math-PRM-7B"
-                    ],
+                    prm_architecture=architectures["Qwen2.5-Math-PRM-7B"],
                     checkpoint_interval=config.protocol.checkpoint_interval,
                 )
                 primary_initial_cost = FlopCost()
                 all_initial_cost = FlopCost()
                 for state in first_primary:
-                    primary_initial_cost += initial_flops[
-                        str(state["checkpoint_id"])
-                    ]
+                    primary_initial_cost += initial_flops[str(state["checkpoint_id"])]
                 primary_initial_cost = FlopCost(
-                    generator_reasoning=(
-                        primary_initial_cost.generator_reasoning
-                    ),
+                    generator_reasoning=(primary_initial_cost.generator_reasoning),
                     generator_probe=primary_initial_cost.generator_probe,
                 )
-                by_problem_first: dict[str, list[dict[str, Any]]] = defaultdict(
-                    list
-                )
+                by_problem_first: dict[str, list[dict[str, Any]]] = defaultdict(list)
                 for state in first_all:
                     by_problem_first[str(state["problem_id"])].append(state)
-                    all_initial_cost += initial_flops[
-                        str(state["checkpoint_id"])
-                    ]
+                    all_initial_cost += initial_flops[str(state["checkpoint_id"])]
                 shared_prompt_adjustment = 0.0
                 for problem_states in by_problem_first.values():
                     if len(problem_states) != 4:
@@ -6617,8 +5980,7 @@ def render_agreement_accounting(
                     )
                 all_initial_cost = FlopCost(
                     generator_reasoning=(
-                        all_initial_cost.generator_reasoning
-                        - shared_prompt_adjustment
+                        all_initial_cost.generator_reasoning - shared_prompt_adjustment
                     ),
                     generator_probe=all_initial_cost.generator_probe,
                 )
@@ -6640,12 +6002,8 @@ def render_agreement_accounting(
                     depth = int(state["depth"])
                     cost = FlopCost()
                     for auxiliary in range(4):
-                        auxiliary_state = state_index[
-                            (problem_id, auxiliary, depth)
-                        ]
-                        cost += transition_flops[
-                            str(auxiliary_state["checkpoint_id"])
-                        ]
+                        auxiliary_state = state_index[(problem_id, auxiliary, depth)]
+                        cost += transition_flops[str(auxiliary_state["checkpoint_id"])]
                     parallel_transitions[str(state["checkpoint_id"])] = (
                         _flop_cost_value(cost, ledger, calibration)
                     )
@@ -6728,11 +6086,7 @@ def render_agreement_accounting(
             "calibrated_h20_seconds",
         ):
             problem_ids = sorted(
-                {
-                    key[3]
-                    for key in grouped
-                    if key[0] == model and key[1] == ledger
-                }
+                {key[3] for key in grouped if key[0] == model and key[1] == ledger}
             )
             baseline = np.asarray(
                 [
@@ -6762,17 +6116,17 @@ def render_agreement_accounting(
                         np.mean(
                             [
                                 float(row["normalized_aulc"])
-                                for row in grouped[
-                                    (model, ledger, policy, problem_id)
-                                ]
+                                for row in grouped[(model, ledger, policy, problem_id)]
                             ]
                         )
                         for problem_id in problem_ids
                     ]
                 )
-                gain = 100.0 * (
-                    float(values.mean()) - float(baseline.mean())
-                ) / float(baseline.mean())
+                gain = (
+                    100.0
+                    * (float(values.mean()) - float(baseline.mean()))
+                    / float(baseline.mean())
+                )
                 rng = np.random.default_rng(
                     stable_seed(
                         BOOTSTRAP_SEED,
@@ -6789,10 +6143,14 @@ def render_agreement_accounting(
                         len(problem_ids),
                         size=len(problem_ids),
                     )
-                    bootstrap[index] = 100.0 * (
-                        float(values[selected].mean())
-                        - float(baseline[selected].mean())
-                    ) / float(baseline[selected].mean())
+                    bootstrap[index] = (
+                        100.0
+                        * (
+                            float(values[selected].mean())
+                            - float(baseline[selected].mean())
+                        )
+                        / float(baseline[selected].mean())
+                    )
                 summary_rows.append(
                     {
                         "model": model,
@@ -6802,12 +6160,8 @@ def render_agreement_accounting(
                         "spine_replicates": 4,
                         "mean_problem_accuracy": float(values.mean()),
                         "relative_gain_vs_round_robin_percent": gain,
-                        "relative_gain_low": float(
-                            np.quantile(bootstrap, 0.025)
-                        ),
-                        "relative_gain_high": float(
-                            np.quantile(bootstrap, 0.975)
-                        ),
+                        "relative_gain_low": float(np.quantile(bootstrap, 0.025)),
+                        "relative_gain_high": float(np.quantile(bootstrap, 0.975)),
                     }
                 )
     seed_path = OUT / "agreement_accounting_seeds.csv"
@@ -6952,18 +6306,15 @@ def render_agreement_accounting(
             ),
             "spine_replicates": [0, 1, 2, 3],
             "bootstrap_replicates": BOOTSTRAP_REPLICATES,
-            "calibration_sha256": source_calibration_digests,
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "artifacts_sha256": {
-                path.name: file_sha256(path)
+            "artifacts": [
+                path.name
                 for path in (
                     seed_path,
                     problem_path,
@@ -6971,7 +6322,7 @@ def render_agreement_accounting(
                     table_path,
                     policy_table_path,
                 )
-            },
+            ],
         }
     )
     atomic_text(
@@ -7042,24 +6393,16 @@ def render_multi_ledger_replay(
         )
         score_maps = oracle_score_maps(values_by_model[model])
         for spine_id in range(4):
-            selected = [
-                state
-                for state in states
-                if int(state["spine_id"]) == spine_id
-            ]
+            selected = [state for state in states if int(state["spine_id"]) == spine_id]
             logical_traces = {}
             for policy, (scheduler, score_name) in policy_specs.items():
                 logical_traces[policy] = _replay_one_with_problem_events(
                     selected,
                     scheduler,
                     checkpoint_interval=config.protocol.checkpoint_interval,
-                    fixed_allotment_tokens=(
-                        config.execution.fixed_allotment_tokens
-                    ),
+                    fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                     overridden_values=(
-                        score_maps[str(score_name)]
-                        if score_name is not None
-                        else None
+                        score_maps[str(score_name)] if score_name is not None else None
                     ),
                 )
             for ledger in (
@@ -7083,12 +6426,8 @@ def render_multi_ledger_replay(
                         transition_costs=transition_costs,
                         ledger=ledger,
                         calibration=calibration,
-                        prm_architecture=architectures[
-                            "Qwen2.5-Math-PRM-7B"
-                        ],
-                        checkpoint_interval=(
-                            config.protocol.checkpoint_interval
-                        ),
+                        prm_architecture=architectures["Qwen2.5-Math-PRM-7B"],
+                        checkpoint_interval=(config.protocol.checkpoint_interval),
                     )
                 start_budget = traces["round_robin"][0][0].budget
                 endpoint = min(trace[0][-1].budget for trace in traces.values())
@@ -7163,11 +6502,7 @@ def render_multi_ledger_replay(
     for model in RUNS:
         for ledger in ("estimated_pflops", "calibrated_h20_seconds"):
             problem_ids = sorted(
-                {
-                    key[3]
-                    for key in grouped
-                    if key[0] == model and key[1] == ledger
-                }
+                {key[3] for key in grouped if key[0] == model and key[1] == ledger}
             )
             for policy in policy_specs:
                 values = np.asarray(
@@ -7175,9 +6510,7 @@ def render_multi_ledger_replay(
                         np.mean(
                             [
                                 float(row["normalized_aulc"])
-                                for row in grouped[
-                                    (model, ledger, policy, problem_id)
-                                ]
+                                for row in grouped[(model, ledger, policy, problem_id)]
                             ]
                         )
                         for problem_id in problem_ids
@@ -7224,10 +6557,7 @@ def render_multi_ledger_replay(
                     )
                     boot[index] = (
                         100.0
-                        * (
-                            float(values[sample].mean())
-                            - float(rr[sample].mean())
-                        )
+                        * (float(values[sample].mean()) - float(rr[sample].mean()))
                         / float(rr[sample].mean())
                     )
                 summary_rows.append(
@@ -7257,14 +6587,11 @@ def render_multi_ledger_replay(
     logical = {
         (row["model"], row["policy"]): row
         for row in csv.DictReader(
-            (OUT / "spine_replicate_replay_summary.csv").open(
-                encoding="utf-8"
-            )
+            (OUT / "spine_replicate_replay_summary.csv").open(encoding="utf-8")
         )
     }
     physical = {
-        (row["model"], row["ledger"], row["policy"]): row
-        for row in summary_rows
+        (row["model"], row["ledger"], row["policy"]): row for row in summary_rows
     }
     table_rows: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
     for model in RUNS:
@@ -7346,7 +6673,6 @@ def render_multi_ledger_replay(
         {
             "schema_version": MULTI_LEDGER_NAMESPACE,
             "analysis_status": "supplementary, read-only",
-            "architecture_bundle_sha256": file_sha256(ARCHITECTURES_PATH),
             "flop_convention": architecture_bundle["flop_convention"],
             "cost_semantics": {
                 "logical_tokens": "primary ledger",
@@ -7367,14 +6693,12 @@ def render_multi_ledger_replay(
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "artifacts_sha256": {
-                path.name: file_sha256(path)
+            "artifacts": [
+                path.name
                 for path in (
                     seed_path,
                     problem_path,
@@ -7382,7 +6706,7 @@ def render_multi_ledger_replay(
                     calibration_path,
                     table_path,
                 )
-            },
+            ],
         }
     )
     atomic_text(
@@ -7445,10 +6769,7 @@ def _ridge_design_matrix(
     columns = [np.ones(len(rows), dtype=float)]
     for feature in raw_features:
         missing = np.asarray(
-            [
-                row["proxies"].get(feature) is None
-                for row in rows
-            ],
+            [row["proxies"].get(feature) is None for row in rows],
             dtype=float,
         )
         values = np.asarray(
@@ -7462,9 +6783,9 @@ def _ridge_design_matrix(
             ],
             dtype=float,
         )
-        values = (
-            values - float(preprocessing["means"][feature])
-        ) / float(preprocessing["scales"][feature])
+        values = (values - float(preprocessing["means"][feature])) / float(
+            preprocessing["scales"][feature]
+        )
         names.extend([feature, f"{feature}__missing"])
         columns.extend([values, missing])
     names.extend(["depth_fraction", "dataset_math500"])
@@ -7518,16 +6839,8 @@ def _fit_ridge_controller(
         % 5
         == 0
     }
-    fit_rows = [
-        row
-        for row in analysis
-        if str(row["problem_id"]) not in tune_problems
-    ]
-    tune_rows = [
-        row
-        for row in analysis
-        if str(row["problem_id"]) in tune_problems
-    ]
+    fit_rows = [row for row in analysis if str(row["problem_id"]) not in tune_problems]
+    tune_rows = [row for row in analysis if str(row["problem_id"]) in tune_problems]
     if not fit_rows or not tune_rows:
         raise ValueError("ridge analysis split is empty")
     preprocessing = _ridge_design_fit(fit_rows, raw_features)
@@ -7601,14 +6914,10 @@ def _fit_ridge_controller(
     )
     correlation = float(np.corrcoef(predictions, truth)[0, 1])
     beneficial_rows = [
-        index
-        for index, row in enumerate(confirmation)
-        if int(row["stop_correct"]) == 0
+        index for index, row in enumerate(confirmation) if int(row["stop_correct"]) == 0
     ]
     harmful_rows = [
-        index
-        for index, row in enumerate(confirmation)
-        if int(row["stop_correct"]) == 1
+        index for index, row in enumerate(confirmation) if int(row["stop_correct"]) == 1
     ]
     beneficial_auc = roc_auc(
         [int(confirmation[index]["beneficial"]) for index in beneficial_rows],
@@ -7683,9 +6992,7 @@ def render_learned_controller(
     for model, payload in validated.items():
         all_rows = values_by_model[model]
         analysis = [row for row in all_rows if row["split"] == "analysis"]
-        confirmation = [
-            row for row in all_rows if row["split"] == "confirmation"
-        ]
+        confirmation = [row for row in all_rows if row["split"] == "confirmation"]
         predictions: dict[str, dict[str, float]] = {}
         fits[model] = {}
         for policy, features in specifications.items():
@@ -7703,15 +7010,9 @@ def render_learned_controller(
                     "policy": policy,
                     "selected_alpha": metadata["selected_alpha"],
                     "confirmation_mse": metadata["confirmation_mse"],
-                    "confirmation_pearson": metadata[
-                        "confirmation_pearson"
-                    ],
-                    "beneficial_auroc": metadata[
-                        "confirmation_beneficial_auroc"
-                    ],
-                    "harmful_auroc": metadata[
-                        "confirmation_harmful_auroc"
-                    ],
+                    "confirmation_pearson": metadata["confirmation_pearson"],
+                    "beneficial_auroc": metadata["confirmation_beneficial_auroc"],
+                    "harmful_auroc": metadata["confirmation_harmful_auroc"],
                     "inference_cpu_seconds": metadata[
                         "controller_inference_cpu_seconds"
                     ],
@@ -7727,9 +7028,7 @@ def render_learned_controller(
         )
         for spine_id in range(4):
             selected_states = [
-                state
-                for state in states
-                if int(state["spine_id"]) == spine_id
+                state for state in states if int(state["spine_id"]) == spine_id
             ]
             round_robin = _replay_one_with_problem_events(
                 selected_states,
@@ -7742,9 +7041,7 @@ def render_learned_controller(
                     selected_states,
                     "oracle",
                     checkpoint_interval=config.protocol.checkpoint_interval,
-                    fixed_allotment_tokens=(
-                        config.execution.fixed_allotment_tokens
-                    ),
+                    fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                     overridden_values=predictions[policy],
                     charge_prm=(policy == "ridge_observable_prm"),
                 )
@@ -7820,11 +7117,7 @@ def render_learned_controller(
     for model in RUNS:
         for controller in specifications:
             problem_ids = sorted(
-                {
-                    key[3]
-                    for key in grouped
-                    if key[0] == model and key[1] == controller
-                }
+                {key[3] for key in grouped if key[0] == model and key[1] == controller}
             )
             baseline = np.asarray(
                 [
@@ -7862,9 +7155,11 @@ def render_learned_controller(
                     for problem_id in problem_ids
                 ]
             )
-            gain = 100.0 * (
-                float(values.mean()) - float(baseline.mean())
-            ) / float(baseline.mean())
+            gain = (
+                100.0
+                * (float(values.mean()) - float(baseline.mean()))
+                / float(baseline.mean())
+            )
             rng = np.random.default_rng(
                 stable_seed(
                     BOOTSTRAP_SEED,
@@ -7880,10 +7175,11 @@ def render_learned_controller(
                     len(problem_ids),
                     size=len(problem_ids),
                 )
-                bootstrap[index] = 100.0 * (
-                    float(values[sample].mean())
-                    - float(baseline[sample].mean())
-                ) / float(baseline[sample].mean())
+                bootstrap[index] = (
+                    100.0
+                    * (float(values[sample].mean()) - float(baseline[sample].mean()))
+                    / float(baseline[sample].mean())
+                )
             summary_rows.append(
                 {
                     "model": model,
@@ -7893,12 +7189,8 @@ def render_learned_controller(
                     "round_robin_mean_accuracy": float(baseline.mean()),
                     "controller_mean_accuracy": float(values.mean()),
                     "relative_gain_vs_round_robin_percent": gain,
-                    "relative_gain_low": float(
-                        np.quantile(bootstrap, 0.025)
-                    ),
-                    "relative_gain_high": float(
-                        np.quantile(bootstrap, 0.975)
-                    ),
+                    "relative_gain_low": float(np.quantile(bootstrap, 0.025)),
+                    "relative_gain_high": float(np.quantile(bootstrap, 0.975)),
                 }
             )
     predictive_path = OUT / "learned_controller_predictive.csv"
@@ -7987,14 +7279,12 @@ def render_learned_controller(
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "artifacts_sha256": {
-                path.name: file_sha256(path)
+            "artifacts": [
+                path.name
                 for path in (
                     predictive_path,
                     seed_path,
@@ -8003,7 +7293,7 @@ def render_learned_controller(
                     fit_path,
                     table_path,
                 )
-            },
+            ],
         }
     )
     atomic_text(
@@ -8040,10 +7330,7 @@ def _binomial_objective(
     )
     loss = -np.sum(
         weights
-        * (
-            target * np.log(probability)
-            + (1.0 - target) * np.log(1.0 - probability)
-        )
+        * (target * np.log(probability) + (1.0 - target) * np.log(1.0 - probability))
     )
     return float(loss + 0.5 * alpha * np.sum(coefficients[1:] ** 2))
 
@@ -8078,18 +7365,14 @@ def _logistic_solve(
     )
     for _ in range(100):
         probability = _sigmoid(design @ coefficients)
-        gradient = (
-            design.T @ (weights * (probability - target))
-            + alpha * (penalty @ coefficients)
+        gradient = design.T @ (weights * (probability - target)) + alpha * (
+            penalty @ coefficients
         )
         curvature = np.maximum(
             weights * probability * (1.0 - probability),
             1e-10,
         )
-        hessian = (
-            design.T @ (design * curvature[:, None])
-            + alpha * penalty
-        )
+        hessian = design.T @ (design * curvature[:, None]) + alpha * penalty
         try:
             step = np.linalg.solve(hessian, gradient)
         except np.linalg.LinAlgError:
@@ -8134,26 +7417,16 @@ def _component_rows_and_targets(
         )
         weights = np.ones(len(selected), dtype=float)
     elif component == "recovery_given_wrong":
-        selected = [
-            row for row in rows if int(row["stop_correct"]) == 0
-        ]
+        selected = [row for row in rows if int(row["stop_correct"]) == 0]
         targets = np.asarray(
-            [
-                float(np.mean(row["continuation_correct"]))
-                for row in selected
-            ],
+            [float(np.mean(row["continuation_correct"])) for row in selected],
             dtype=float,
         )
         weights = np.full(len(selected), 4.0, dtype=float)
     elif component == "damage_given_correct":
-        selected = [
-            row for row in rows if int(row["stop_correct"]) == 1
-        ]
+        selected = [row for row in rows if int(row["stop_correct"]) == 1]
         targets = np.asarray(
-            [
-                1.0 - float(np.mean(row["continuation_correct"]))
-                for row in selected
-            ],
+            [1.0 - float(np.mean(row["continuation_correct"])) for row in selected],
             dtype=float,
         )
         weights = np.full(len(selected), 4.0, dtype=float)
@@ -8185,16 +7458,8 @@ def _fit_logistic_component(
         % 5
         == 0
     }
-    fit_all = [
-        row
-        for row in analysis
-        if str(row["problem_id"]) not in tune_problems
-    ]
-    tune_all = [
-        row
-        for row in analysis
-        if str(row["problem_id"]) in tune_problems
-    ]
+    fit_all = [row for row in analysis if str(row["problem_id"]) not in tune_problems]
+    tune_all = [row for row in analysis if str(row["problem_id"]) in tune_problems]
     fit_rows, fit_target, fit_weights = _component_rows_and_targets(
         fit_all,
         component,
@@ -8351,17 +7616,11 @@ def _stratified_continuation_moments(
         ):
             raise ValueError(f"incomplete two-stage stratum: {key}")
         values = {
-            "recovery_rate": (
-                bucket["recovery_successes"] + 0.5
-            )
+            "recovery_rate": (bucket["recovery_successes"] + 0.5)
             / (bucket["recovery_trials"] + 1.0),
-            "damage_rate": (
-                bucket["damage_successes"] + 0.5
-            )
+            "damage_rate": (bucket["damage_successes"] + 0.5)
             / (bucket["damage_trials"] + 1.0),
-            "mean_branch_cost": (
-                bucket["cost_total"] / bucket["cost_branches"]
-            ),
+            "mean_branch_cost": (bucket["cost_total"] / bucket["cost_branches"]),
             **bucket,
         }
         moments[key] = values
@@ -8377,9 +7636,11 @@ def _bootstrap_relative_gain(
 ) -> dict[str, float]:
     if candidate.shape != baseline.shape or candidate.ndim != 1:
         raise ValueError("invalid paired bootstrap arrays")
-    observed = 100.0 * (
-        float(candidate.mean()) - float(baseline.mean())
-    ) / float(baseline.mean())
+    observed = (
+        100.0
+        * (float(candidate.mean()) - float(baseline.mean()))
+        / float(baseline.mean())
+    )
     rng = np.random.default_rng(
         stable_seed(
             BOOTSTRAP_SEED,
@@ -8390,10 +7651,11 @@ def _bootstrap_relative_gain(
     samples = np.empty(BOOTSTRAP_REPLICATES, dtype=float)
     for index in range(BOOTSTRAP_REPLICATES):
         selected = rng.integers(0, len(candidate), size=len(candidate))
-        samples[index] = 100.0 * (
-            float(candidate[selected].mean())
-            - float(baseline[selected].mean())
-        ) / float(baseline[selected].mean())
+        samples[index] = (
+            100.0
+            * (float(candidate[selected].mean()) - float(baseline[selected].mean()))
+            / float(baseline[selected].mean())
+        )
     return {
         "estimate": observed,
         "low": float(np.quantile(samples, 0.025)),
@@ -8418,9 +7680,7 @@ def render_controller_decomposition(
     seed_rows: list[dict[str, Any]] = []
     problem_rows: list[dict[str, Any]] = []
     curve_rows: list[dict[str, Any]] = []
-    compact_contexts: dict[str, list[CompactReplayContext]] = defaultdict(
-        list
-    )
+    compact_contexts: dict[str, list[CompactReplayContext]] = defaultdict(list)
     policy_order = (
         "round_robin",
         "wrong_probability_only",
@@ -8431,9 +7691,7 @@ def render_controller_decomposition(
     for model, payload in validated.items():
         all_rows = values_by_model[model]
         analysis = [row for row in all_rows if row["split"] == "analysis"]
-        confirmation = [
-            row for row in all_rows if row["split"] == "confirmation"
-        ]
+        confirmation = [row for row in all_rows if row["split"] == "confirmation"]
         q_map, q_fit = _fit_logistic_component(
             analysis,
             confirmation,
@@ -8461,9 +7719,7 @@ def render_controller_decomposition(
             model=model,
             raw_features=raw_features,
         )
-        moments, serialized_moments = _stratified_continuation_moments(
-            analysis
-        )
+        moments, serialized_moments = _stratified_continuation_moments(analysis)
         score_maps: dict[str, dict[str, float]] = {
             "wrong_probability_only": {},
             "correctness_stratified_ev": {},
@@ -8475,9 +7731,7 @@ def render_controller_decomposition(
             q = q_map[checkpoint_id]
             recovery = recovery_map[checkpoint_id]
             damage = damage_map[checkpoint_id]
-            stratum = moments[
-                (str(row["dataset_id"]), int(row["depth"]))
-            ]
+            stratum = moments[(str(row["dataset_id"]), int(row["depth"]))]
             cost = float(stratum["mean_branch_cost"])
             score_maps["wrong_probability_only"][checkpoint_id] = q
             score_maps["correctness_stratified_ev"][checkpoint_id] = (
@@ -8491,18 +7745,10 @@ def render_controller_decomposition(
             score_maps["two_stage_ev"][checkpoint_id] = (
                 1000.0 * (q * recovery - (1.0 - q) * damage) / cost
             )
-        wrong_labels = [
-            1 - int(row["stop_correct"]) for row in confirmation
-        ]
-        wrong_scores = [
-            q_map[str(row["checkpoint_id"])] for row in confirmation
-        ]
-        wrong_rows = [
-            row for row in confirmation if int(row["stop_correct"]) == 0
-        ]
-        correct_rows = [
-            row for row in confirmation if int(row["stop_correct"]) == 1
-        ]
+        wrong_labels = [1 - int(row["stop_correct"]) for row in confirmation]
+        wrong_scores = [q_map[str(row["checkpoint_id"])] for row in confirmation]
+        wrong_rows = [row for row in confirmation if int(row["stop_correct"]) == 0]
+        correct_rows = [row for row in confirmation if int(row["stop_correct"]) == 1]
         recovery_auc = roc_auc(
             [int(row["beneficial"]) for row in wrong_rows],
             [recovery_map[str(row["checkpoint_id"])] for row in wrong_rows],
@@ -8512,38 +7758,23 @@ def render_controller_decomposition(
             [damage_map[str(row["checkpoint_id"])] for row in correct_rows],
         )
         recovery_probabilities = np.asarray(
-            [
-                recovery_map[str(row["checkpoint_id"])]
-                for row in wrong_rows
-            ],
+            [recovery_map[str(row["checkpoint_id"])] for row in wrong_rows],
             dtype=float,
         )
         recovery_frequencies = np.asarray(
-            [
-                float(np.mean(row["continuation_correct"]))
-                for row in wrong_rows
-            ],
+            [float(np.mean(row["continuation_correct"])) for row in wrong_rows],
             dtype=float,
         )
         damage_probabilities = np.asarray(
-            [
-                damage_map[str(row["checkpoint_id"])]
-                for row in correct_rows
-            ],
+            [damage_map[str(row["checkpoint_id"])] for row in correct_rows],
             dtype=float,
         )
         damage_frequencies = np.asarray(
-            [
-                1.0 - float(np.mean(row["continuation_correct"]))
-                for row in correct_rows
-            ],
+            [1.0 - float(np.mean(row["continuation_correct"])) for row in correct_rows],
             dtype=float,
         )
         ridge_wrong = np.asarray(
-            [
-                ridge_map[str(row["checkpoint_id"])]
-                for row in wrong_rows
-            ],
+            [ridge_map[str(row["checkpoint_id"])] for row in wrong_rows],
             dtype=float,
         )
         ridge_wrong_truth = np.asarray(
@@ -8551,10 +7782,7 @@ def render_controller_decomposition(
             dtype=float,
         )
         ridge_correct = np.asarray(
-            [
-                ridge_map[str(row["checkpoint_id"])]
-                for row in correct_rows
-            ],
+            [ridge_map[str(row["checkpoint_id"])] for row in correct_rows],
             dtype=float,
         )
         ridge_correct_truth = np.asarray(
@@ -8582,10 +7810,7 @@ def render_controller_decomposition(
                 "conditional_recovery_branch_brier": float(
                     np.mean(
                         [
-                            (
-                                recovery_map[str(row["checkpoint_id"])]
-                                - int(outcome)
-                            )
+                            (recovery_map[str(row["checkpoint_id"])] - int(outcome))
                             ** 2
                             for row in wrong_rows
                             for outcome in row["continuation_correct"]
@@ -8595,10 +7820,7 @@ def render_controller_decomposition(
                 "conditional_damage_branch_brier": float(
                     np.mean(
                         [
-                            (
-                                damage_map[str(row["checkpoint_id"])]
-                                - (1 - int(outcome))
-                            )
+                            (damage_map[str(row["checkpoint_id"])] - (1 - int(outcome)))
                             ** 2
                             for row in correct_rows
                             for outcome in row["continuation_correct"]
@@ -8634,9 +7856,7 @@ def render_controller_decomposition(
         )
         for spine_id in range(4):
             selected_states = [
-                state
-                for state in states
-                if int(state["spine_id"]) == spine_id
+                state for state in states if int(state["spine_id"]) == spine_id
             ]
             compact_contexts[model].append(
                 _build_compact_replay_context(
@@ -8656,9 +7876,7 @@ def render_controller_decomposition(
                     selected_states,
                     "round_robin",
                     checkpoint_interval=config.protocol.checkpoint_interval,
-                    fixed_allotment_tokens=(
-                        config.execution.fixed_allotment_tokens
-                    ),
+                    fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                 )
             }
             for policy in policy_order[1:]:
@@ -8666,9 +7884,7 @@ def render_controller_decomposition(
                     selected_states,
                     "oracle",
                     checkpoint_interval=config.protocol.checkpoint_interval,
-                    fixed_allotment_tokens=(
-                        config.execution.fixed_allotment_tokens
-                    ),
+                    fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                     overridden_values=score_maps[policy],
                 )
             start_budget = traces["round_robin"][0][0].budget
@@ -8716,18 +7932,13 @@ def render_controller_decomposition(
                     mean_accuracy,
                     float(
                         np.mean(
-                            [
-                                row["normalized_aulc"]
-                                for row in contributions.values()
-                            ]
+                            [row["normalized_aulc"] for row in contributions.values()]
                         )
                     ),
                     rel_tol=0.0,
                     abs_tol=1e-10,
                 ):
-                    raise ValueError(
-                        "controller decomposition contribution mismatch"
-                    )
+                    raise ValueError("controller decomposition contribution mismatch")
                 seed_rows.append(
                     {
                         "model": model,
@@ -8757,9 +7968,7 @@ def render_controller_decomposition(
         list[dict[str, Any]],
     ] = defaultdict(list)
     for row in problem_rows:
-        grouped[(row["model"], row["policy"], row["problem_id"])].append(
-            row
-        )
+        grouped[(row["model"], row["policy"], row["problem_id"])].append(row)
     summary_rows: list[dict[str, Any]] = []
     model_vectors: dict[str, dict[str, np.ndarray]] = {}
     for model in RUNS:
@@ -8780,9 +7989,7 @@ def render_controller_decomposition(
                         np.mean(
                             [
                                 row["normalized_aulc"]
-                                for row in grouped[
-                                    (model, policy, problem_id)
-                                ]
+                                for row in grouped[(model, policy, problem_id)]
                             ]
                         )
                     )
@@ -8814,20 +8021,14 @@ def render_controller_decomposition(
                     "problems": len(problem_ids),
                     "spine_replicates": 4,
                     "mean_problem_accuracy": float(vectors[policy].mean()),
-                    "gain_vs_round_robin_percent": versus_round_robin[
-                        "estimate"
-                    ],
+                    "gain_vs_round_robin_percent": versus_round_robin["estimate"],
                     "gain_vs_round_robin_low": versus_round_robin["low"],
                     "gain_vs_round_robin_high": versus_round_robin["high"],
                     "incremental_vs_correctness_percent": (
                         versus_correctness["estimate"]
                     ),
-                    "incremental_vs_correctness_low": (
-                        versus_correctness["low"]
-                    ),
-                    "incremental_vs_correctness_high": (
-                        versus_correctness["high"]
-                    ),
+                    "incremental_vs_correctness_low": (versus_correctness["low"]),
+                    "incremental_vs_correctness_high": (versus_correctness["high"]),
                 }
             )
 
@@ -8850,22 +8051,18 @@ def render_controller_decomposition(
             f"({BOOTSTRAP_REPLICATES} replicates)",
             flush=True,
         )
-        observed, bootstrap_samples, replicate_rows = (
-            _paired_full_replay_bootstrap(
-                compact_contexts[model],
-                policies=hierarchy_order,
-                replicates=BOOTSTRAP_REPLICATES,
-                seed_parts=(model, "controller-hierarchy"),
-            )
+        observed, bootstrap_samples, replicate_rows = _paired_full_replay_bootstrap(
+            compact_contexts[model],
+            policies=hierarchy_order,
+            replicates=BOOTSTRAP_REPLICATES,
+            seed_parts=(model, "controller-hierarchy"),
         )
         print(
             f"full-system replay bootstrap complete: {model}",
             flush=True,
         )
         for replicate_row in replicate_rows:
-            full_bootstrap_rows.append(
-                {"model": model, **replicate_row}
-            )
+            full_bootstrap_rows.append({"model": model, **replicate_row})
         expected = {
             policy: float(model_vectors[model][policy].mean())
             for policy in hierarchy_order
@@ -8882,83 +8079,55 @@ def render_controller_decomposition(
                     "reproduce the authoritative point estimate"
                 )
         full_bootstrap_metadata[model] = {
-            "problems_per_replicate": len(
-                compact_contexts[model][0].problem_ids
-            ),
+            "problems_per_replicate": len(compact_contexts[model][0].problem_ids),
             "spine_repetitions": len(compact_contexts[model]),
             "replicates": BOOTSTRAP_REPLICATES,
             "unique_source_problems": {
                 "min": min(
-                    int(row["unique_source_problems"])
-                    for row in replicate_rows
+                    int(row["unique_source_problems"]) for row in replicate_rows
                 ),
                 "median": float(
                     np.median(
-                        [
-                            int(row["unique_source_problems"])
-                            for row in replicate_rows
-                        ]
+                        [int(row["unique_source_problems"]) for row in replicate_rows]
                     )
                 ),
                 "max": max(
-                    int(row["unique_source_problems"])
-                    for row in replicate_rows
+                    int(row["unique_source_problems"]) for row in replicate_rows
                 ),
             },
         }
         round_robin_samples = bootstrap_samples["round_robin"]
-        shortcut_samples = bootstrap_samples[
-            "correctness_stratified_ev"
-        ]
+        shortcut_samples = bootstrap_samples["correctness_stratified_ev"]
         for policy in hierarchy_order:
             policy_samples = bootstrap_samples[policy]
             gain_samples = (
-                100.0
-                * (policy_samples - round_robin_samples)
-                / round_robin_samples
+                100.0 * (policy_samples - round_robin_samples) / round_robin_samples
             )
             shortcut_increment_samples = (
-                100.0
-                * (policy_samples - shortcut_samples)
-                / shortcut_samples
+                100.0 * (policy_samples - shortcut_samples) / shortcut_samples
             )
             gain_estimate = (
                 100.0
-                * (
-                    observed[policy] - observed["round_robin"]
-                )
+                * (observed[policy] - observed["round_robin"])
                 / observed["round_robin"]
             )
             shortcut_increment_estimate = (
                 100.0
-                * (
-                    observed[policy]
-                    - observed["correctness_stratified_ev"]
-                )
+                * (observed[policy] - observed["correctness_stratified_ev"])
                 / observed["correctness_stratified_ev"]
             )
             hierarchy_rows.append(
                 {
                     "model": model,
                     "policy": policy,
-                    "analysis_status": (
-                        "paired full-system problem bootstrap"
-                    ),
-                    "problems": len(
-                        compact_contexts[model][0].problem_ids
-                    ),
+                    "analysis_status": ("paired full-system problem bootstrap"),
+                    "problems": len(compact_contexts[model][0].problem_ids),
                     "spine_replicates": 4,
                     "mean_normalized_aulc": observed[policy],
                     "gain_vs_round_robin_percent": gain_estimate,
-                    "gain_vs_round_robin_low": float(
-                        np.quantile(gain_samples, 0.025)
-                    ),
-                    "gain_vs_round_robin_high": float(
-                        np.quantile(gain_samples, 0.975)
-                    ),
-                    "incremental_vs_shortcut_percent": (
-                        shortcut_increment_estimate
-                    ),
+                    "gain_vs_round_robin_low": float(np.quantile(gain_samples, 0.025)),
+                    "gain_vs_round_robin_high": float(np.quantile(gain_samples, 0.975)),
+                    "incremental_vs_shortcut_percent": (shortcut_increment_estimate),
                     "incremental_vs_shortcut_low": float(
                         np.quantile(
                             shortcut_increment_samples,
@@ -8998,10 +8167,7 @@ def render_controller_decomposition(
         r"\footnotesize",
         r"\begin{tabular}{lrrr}",
         r"\toprule",
-        (
-            r"Model & Current wrong AUROC & Recovery AUROC & "
-            r"Damage AUROC \\"
-        ),
+        (r"Model & Current wrong AUROC & Recovery AUROC & " r"Damage AUROC \\"),
         r"\midrule",
     ]
     for row in predictive_rows:
@@ -9031,9 +8197,7 @@ def render_controller_decomposition(
             "",
         ]
     )
-    predictive_table_path = (
-        OUT / "controller_decomposition_predictive_table.tex"
-    )
+    predictive_table_path = OUT / "controller_decomposition_predictive_table.tex"
     atomic_text(predictive_table_path, "\n".join(predictive_table))
     replay_table = [
         r"\begin{table*}[t]",
@@ -9160,9 +8324,7 @@ def render_controller_decomposition(
                     float(row["problem_accuracy"])
                 )
             budgets = sorted(by_budget)
-            means = [
-                float(np.mean(by_budget[budget])) for budget in budgets
-            ]
+            means = [float(np.mean(by_budget[budget])) for budget in budgets]
             axis.plot(
                 budgets,
                 means,
@@ -9171,8 +8333,7 @@ def render_controller_decomposition(
                 linestyle=figure_styles[policy],
                 linewidth=(
                     1.9
-                    if policy
-                    in {"correctness_stratified_ev", "direct_ridge_m"}
+                    if policy in {"correctness_stratified_ev", "direct_ridge_m"}
                     else 1.35
                 ),
                 drawstyle="steps-post",
@@ -9256,9 +8417,7 @@ def render_controller_decomposition(
             "conditional_fixed_order_intervals": (
                 "retained only in appendix baseline and opportunity tables"
             ),
-            "full_replay_bootstrap_namespace": (
-                FULL_REPLAY_BOOTSTRAP_NAMESPACE
-            ),
+            "full_replay_bootstrap_namespace": (FULL_REPLAY_BOOTSTRAP_NAMESPACE),
             "full_replay_bootstrap": full_bootstrap_metadata,
             "controller_hierarchy_table_policies": list(hierarchy_order),
             "controller_hierarchy_figure_policies": list(figure_policies),
@@ -9274,23 +8433,17 @@ def render_controller_decomposition(
                 "predicted current wrongness combined with analysis-only "
                 "dataset-depth recovery, damage, and branch-cost means"
             ),
-            "two_stage_identity": (
-                "E[C-S|x] = q(x) r(x) - (1-q(x)) d(x)"
-            ),
+            "two_stage_identity": ("E[C-S|x] = q(x) r(x) - (1-q(x)) d(x)"),
             "bootstrap_unit": "problem ID retaining all four spine repetitions",
             "bootstrap_replicates": BOOTSTRAP_REPLICATES,
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "artifacts_sha256": {
-                path.name: file_sha256(path) for path in artifacts
-            },
+            "artifacts": [path.name for path in artifacts],
         }
     )
     atomic_text(
@@ -9354,8 +8507,7 @@ def _audit_recursive_equal(left: Any, right: Any) -> bool | None:
         if len(left) != len(right):
             return False
         values = [
-            _audit_recursive_equal(a, b)
-            for a, b in zip(left, right, strict=True)
+            _audit_recursive_equal(a, b) for a, b in zip(left, right, strict=True)
         ]
         if any(value is False for value in values):
             return False
@@ -9450,12 +8602,6 @@ def render_parser_adjudication(
         for line in stream:
             row = json.loads(line)
             labels[str(row["id"])] = str(row["answer"])
-    expected_label_digests = {
-        payload["evaluation"]["gold_labels"]["canonical_sha256"]
-        for payload in validated.values()
-    }
-    if expected_label_digests != {file_sha256(label_path)}:
-        raise ValueError("parser audit gold-label digest mismatch")
     sample_cap = 200
     heaps: dict[
         tuple[str, str, str],
@@ -9471,19 +8617,11 @@ def render_parser_adjudication(
             if row["split"] == "confirmation"
         }
         for problem_id in sorted(confirmation_ids):
-            relative = (
-                "problems/"
-                + problem_id.replace(":", "_")
-                + ".json.gz"
-            )
+            relative = "problems/" + problem_id.replace(":", "_") + ".json.gz"
             path = payload["run_dir"] / "evaluation" / relative
-            expected = payload["evaluation"]["artifacts_sha256"].get(relative)
-            if expected is None or file_sha256(path) != expected:
-                raise ValueError(f"parser audit artifact mismatch: {relative}")
             artifact = read_json_gz(path)
             checkpoint_map = {
-                str(row["checkpoint_id"]): row
-                for row in artifact["checkpoints"]
+                str(row["checkpoint_id"]): row for row in artifact["checkpoints"]
             }
             dataset_id = problem_id.split(":", 1)[0]
             for branch in artifact["branches"]:
@@ -9529,11 +8667,7 @@ def render_parser_adjudication(
                     heapq.heappush(heap, item)
                 elif score < -heap[0][0]:
                     heapq.heapreplace(heap, item)
-    selected = [
-        item[2]
-        for heap in heaps.values()
-        for item in heap
-    ]
+    selected = [item[2] for heap in heaps.values() for item in heap]
     selected.sort(
         key=lambda row: (
             row["model"],
@@ -9581,11 +8715,14 @@ def render_parser_adjudication(
                 ),
             }
         )
-        swap = stable_seed(
-            BOOTSTRAP_SEED,
-            "flcva-parser-human-packet-v1",
-            row["sample_id"],
-        ) % 2
+        swap = (
+            stable_seed(
+                BOOTSTRAP_SEED,
+                "flcva-parser-human-packet-v1",
+                row["sample_id"],
+            )
+            % 2
+        )
         answers = [
             str(row["before_raw_answer"]),
             str(row["after_raw_answer"]),
@@ -9613,9 +8750,7 @@ def render_parser_adjudication(
             and row["primary_group"] == group
         ]
         resolved = [
-            row
-            for row in group_rows
-            if row["transition_group_agrees"] is not None
+            row for row in group_rows if row["transition_group_agrees"] is not None
         ]
         agreement = (
             sum(bool(row["transition_group_agrees"]) for row in resolved)
@@ -9651,8 +8786,7 @@ def render_parser_adjudication(
                 "transition_label_agreement_low": interval["low"],
                 "transition_label_agreement_high": interval["high"],
                 "transition_disagreements": sum(
-                    row["transition_group_agrees"] is False
-                    for row in resolved
+                    row["transition_group_agrees"] is False for row in resolved
                 ),
                 "bootstrap_replicates": interval["replicates"],
             }
@@ -9728,25 +8862,17 @@ def render_parser_adjudication(
             "human_review_status": (
                 "packet generated; no human labels claimed or used"
             ),
-            "gold_labels_sha256": file_sha256(label_path),
             "source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in validated.items()
             },
-            "artifacts_sha256": {
-                path.name: file_sha256(path)
-                for path in (
-                    audit_path,
-                    blinded_path,
-                    summary_path,
-                    table_path,
-                )
-            },
+            "artifacts": [
+                path.name
+                for path in (audit_path, blinded_path, summary_path, table_path)
+            ],
         }
     )
     atomic_text(
@@ -9793,9 +8919,7 @@ def aggregate_events(paths: Iterable[Path]) -> dict[str, Any]:
     return totals
 
 
-def render_physical_ledger(
-    validated: dict[str, dict[str, Any]]
-) -> list[Path]:
+def render_physical_ledger(validated: dict[str, dict[str, Any]]) -> list[Path]:
     rows: list[dict[str, Any]] = []
     for model, payload in validated.items():
         run_dir = payload["run_dir"]
@@ -9824,10 +8948,8 @@ def render_physical_ledger(
             if not verify_sealed_record(manifest):
                 raise ValueError(f"{model} parent manifest seal failed: {shard}")
             parent = parent_rows.get(str(manifest["run_id"]))
-            if (
-                parent is None
-                or manifest.get("run_record_sha256")
-                != parent.get("run_record_sha256")
+            if parent is None or manifest.get("run_record_sha256") != parent.get(
+                "run_record_sha256"
             ):
                 raise ValueError(f"{model} unbound physical-ledger parent: {shard}")
             observed_parent_ids.add(str(manifest["run_id"]))
@@ -9842,9 +8964,7 @@ def render_physical_ledger(
             expected_scorer = parent["runtime_scorer_identity"]
             for key, value in expected_scorer.items():
                 if runtime_scorer.get(key) != value:
-                    raise ValueError(
-                        f"{model} scorer identity mismatch: {shard}/{key}"
-                    )
+                    raise ValueError(f"{model} scorer identity mismatch: {shard}/{key}")
             model_load_seconds += runtime_model["load_seconds"]
             prm_load_seconds += runtime_scorer["load_seconds"]
             model_load_peak = max(
@@ -9876,9 +8996,7 @@ def render_physical_ledger(
                 "prm_tokens_per_gpu_second": (
                     scoring["logical_tokens"] / scoring["gpu_seconds"]
                 ),
-                "prm_peak_gib": max(
-                    scoring["peak_gpu_memory_bytes"], prm_load_peak
-                )
+                "prm_peak_gib": max(scoring["peak_gpu_memory_bytes"], prm_load_peak)
                 / (1024**3),
                 "prm_load_minutes": prm_load_seconds / 60,
                 "total_observed_gpu_hours": (
@@ -9941,9 +9059,8 @@ def write_manifest(
     artifacts: list[Path],
 ) -> Path:
     unique_artifacts = sorted(set(artifacts), key=lambda path: path.name)
-    inputs: dict[str, str] = {}
-    for model, payload in validated.items():
-        run_dir = payload["run_dir"]
+    inputs: list[str] = []
+    for payload in validated.values():
         for relative in (
             "manifest.json",
             "audit_manifest.json",
@@ -9954,32 +9071,32 @@ def write_manifest(
             "replay/summary.json",
             "merge_summary.json",
         ):
-            path = run_dir / relative
-            inputs[str(path.relative_to(ROOT))] = file_sha256(path)
-    for path in (OUT / "replay.csv", OUT / "replay_points.csv"):
-        inputs[str(path.relative_to(ROOT))] = file_sha256(path)
-    inputs[str(ARCHITECTURES_PATH.relative_to(ROOT))] = file_sha256(
-        ARCHITECTURES_PATH
+            inputs.append(str((payload["run_dir"] / relative).relative_to(ROOT)))
+    inputs.extend(
+        str(path.relative_to(ROOT))
+        for path in (
+            OUT / "replay.csv",
+            OUT / "replay_points.csv",
+            ARCHITECTURES_PATH,
+            ROOT / "data" / "sealed" / "combined_labels.jsonl",
+        )
     )
-    label_path = ROOT / "data" / "sealed" / "combined_labels.jsonl"
-    inputs[str(label_path.relative_to(ROOT))] = file_sha256(label_path)
-    manifest = seal_record({
-        "schema_version": "flcva-paper-supplement-manifest-v2",
-        "analysis_status": "supplementary, label-aware, read-only",
-        "analysis_script_sha256": file_sha256(Path(__file__).resolve()),
-        "bootstrap_replicates": BOOTSTRAP_REPLICATES,
-        "source_runs": [
-            {
-                "run_id": payload["run"]["run_id"],
-                "result_merkle_root": payload["audit"]["result_merkle_root"],
-            }
-            for payload in validated.values()
-        ],
-        "inputs_sha256": dict(sorted(inputs.items())),
-        "artifacts_sha256": {
-            path.name: file_sha256(path) for path in unique_artifacts
-        },
-    })
+    manifest = seal_record(
+        {
+            "schema_version": "flcva-paper-supplement-manifest-v2",
+            "inputs": sorted(inputs),
+            "analysis_status": "supplementary, label-aware, read-only",
+            "bootstrap_replicates": BOOTSTRAP_REPLICATES,
+            "source_runs": [
+                {
+                    "run_id": payload["run"]["run_id"],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
+                }
+                for payload in validated.values()
+            ],
+            "artifacts": [path.name for path in unique_artifacts],
+        }
+    )
     manifest_path = OUT / "supplement_manifest.json"
     atomic_text(
         manifest_path,
@@ -10005,9 +9122,7 @@ def main() -> None:
     artifacts.extend(render_persistence_sensitivity(validated, values_by_model))
     artifacts.extend(render_k_sensitivity(values_by_model))
     artifacts.extend(render_branch_estimands(values_by_model))
-    artifacts.extend(
-        render_value_ratio_sensitivity(validated, values_by_model)
-    )
+    artifacts.extend(render_value_ratio_sensitivity(validated, values_by_model))
     artifacts.extend(render_oracle_decomposition(validated, values_by_model))
     artifacts.extend(render_leave_one_branch_out(values_by_model))
     artifacts.extend(render_nonmyopic_dp(validated, values_by_model))
@@ -10016,9 +9131,7 @@ def main() -> None:
     artifacts.extend(render_agreement_accounting(validated, values_by_model))
     artifacts.extend(render_multi_ledger_replay(validated, values_by_model))
     artifacts.extend(render_learned_controller(validated, values_by_model))
-    artifacts.extend(
-        render_controller_decomposition(validated, values_by_model)
-    )
+    artifacts.extend(render_controller_decomposition(validated, values_by_model))
     artifacts.extend(render_parser_adjudication(validated))
     artifacts.extend(render_physical_ledger(validated))
     manifest = write_manifest(validated, artifacts)

@@ -23,11 +23,10 @@ from typing import Any
 
 import numpy as np
 
-from flcva.io import file_sha256, read_json_gz, seal_record
+from flcva.io import read_json_gz, seal_record
 from flcva.parsing import answers_equal
 
 from paper.ablation import block_length_sensitivity as base
-
 
 ANALYSIS_ID = "flcva-block-length-analysis-v6"
 ANSWER_OPERATOR = (
@@ -85,8 +84,7 @@ def _backend_answer_raw(row: dict[str, Any]) -> str:
     else:
         if row.get("answer_finish_reason") != "stop" or "}" not in decoded:
             raise ValueError(
-                "backend/decode mismatch is not a reconstructible stop-boundary "
-                "case"
+                "backend/decode mismatch is not a reconstructible stop-boundary " "case"
             )
         operator_text = decoded[: decoded.index("}") + 1]
     return base.CANONICAL_CUE + operator_text
@@ -202,22 +200,14 @@ def _checkpoint_values(
                 "formal_answer_token_match": [
                     row["formal_answer_token_match"] for row in sorted_rows
                 ],
-                "marginal_value": (
-                    1000.0 * (mean_correct - stop) / mean_cost
-                ),
-                "single_draw_recovery": (
-                    mean_correct if stop == 0 else None
-                ),
-                "single_draw_damage": (
-                    1.0 - mean_correct if stop == 1 else None
-                ),
+                "marginal_value": (1000.0 * (mean_correct - stop) / mean_cost),
+                "single_draw_recovery": (mean_correct if stop == 0 else None),
+                "single_draw_damage": (1.0 - mean_correct if stop == 1 else None),
                 "recovery_detected": (
                     int(any(continuation_correct)) if stop == 0 else None
                 ),
                 "damage_detected": (
-                    int(not all(continuation_correct))
-                    if stop == 1
-                    else None
+                    int(not all(continuation_correct)) if stop == 1 else None
                 ),
                 "proxies": rows[0]["proxies"],
             }
@@ -264,12 +254,6 @@ def _upgrade_manifest() -> dict[str, Any]:
                 "the answer-now action is unchanged across length arms"
             ),
             "operator_reconstruction_audit": _OPERATOR_AUDIT,
-            "postseal_evaluator_sha256": file_sha256(
-                Path(__file__).resolve()
-            ),
-            "sealed_generation_script_sha256": file_sha256(
-                Path(base.__file__).resolve()
-            ),
             "superseded_v4_analysis_record_sha256": old_record,
         }
     )
@@ -289,9 +273,7 @@ def evaluate(qwen_results: Path, deepseek_results: Path) -> None:
         json.dumps(
             {
                 "analysis_id": ANALYSIS_ID,
-                "manifest": (
-                    "paper/generated/block_length_sensitivity_manifest.json"
-                ),
+                "manifest": ("paper/generated/block_length_sensitivity_manifest.json"),
                 "record_sha256": manifest["record_sha256"],
             },
             sort_keys=True,

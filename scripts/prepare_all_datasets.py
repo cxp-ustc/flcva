@@ -6,8 +6,6 @@ from pathlib import Path
 
 from flcva.config import DatasetSpec
 from flcva.data import materialize_dataset
-from flcva.io import file_sha256
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,9 +38,9 @@ def main() -> None:
         outputs.append(
             {
                 "dataset": spec.id,
-                **counts,
-                "public_sha256": file_sha256(public),
-                "labels_sha256": file_sha256(labels),
+                "public_file": str(public),
+                "labels_file": str(labels),
+                "counts": counts,
             }
         )
     public_lines: list[str] = []
@@ -67,17 +65,15 @@ def main() -> None:
             {
                 "datasets": outputs,
                 "combined": {
+                    "public_file": str(combined_public),
+                    "labels_file": str(combined_labels),
                     "problems": len(public_lines),
-                    "public_sha256": file_sha256(combined_public),
-                    "labels_sha256": file_sha256(combined_labels),
                 },
             },
             indent=2,
-            sort_keys=True,
         )
     )
 
 
 if __name__ == "__main__":
     main()
-

@@ -56,8 +56,8 @@ These are single-draw rates for a randomly selected 256-token continuation, cond
 **Python 3.10+ is required.** The CPU mock pipeline lets you check the installation and complete workflow without downloading model weights.
 
 ```bash
-git clone https://github.com/cxp-ustc/flcva-review-artifact.git
-cd flcva-review-artifact
+git clone https://github.com/cxp-ustc/flcva.git
+cd flcva
 
 python -m venv .venv
 source .venv/bin/activate
@@ -93,6 +93,10 @@ python -m pip install -r requirements-gpu.txt
 ```
 
 Generate and score both primary models:
+
+The example configurations inherit `stage: canary` from
+`configs/formal-common.yaml`. Set it to `formal` for a full paper-protocol run;
+this enables the frozen-configuration and difficulty-reference checks.
 
 ```bash
 flcva preflight --config configs/formal-qwen3.yaml --require-gpu
@@ -173,6 +177,6 @@ If this work informs your research, please cite the paper. The entry below recor
 
 ## Contact and usage terms
 
-For research questions, contact [Wenyi Zhang](mailto:wenyizha@ustc.edu.cn). For implementation questions, please [open an issue](https://github.com/cxp-ustc/flcva-review-artifact/issues).
+For research questions, contact [Wenyi Zhang](mailto:wenyizha@ustc.edu.cn). For implementation questions, please [open an issue](https://github.com/cxp-ustc/flcva/issues).
 
-The repository's current usage terms are recorded in [`LICENSE_FOR_REVIEW.md`](LICENSE_FOR_REVIEW.md). Datasets and model snapshots remain subject to their original providers' licenses and terms.
+Copyright and usage information is provided in [`RIGHTS.md`](RIGHTS.md). No open-source license is granted. Datasets and model snapshots remain subject to their original providers' licenses and terms.

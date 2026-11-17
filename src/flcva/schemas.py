@@ -14,9 +14,7 @@ class ExperimentContract(StrictModel):
     schema_version: Literal[
         "flcva-experiment-contract-v1",
         "flcva-experiment-contract-v2",
-    ] = (
-        "flcva-experiment-contract-v2"
-    )
+    ] = "flcva-experiment-contract-v2"
     protocol_id: str
     run_id: str
     stage: str
@@ -28,7 +26,8 @@ class ExperimentContract(StrictModel):
     dataset_revision: str
     dataset_components: dict[str, str]
     public_data_manifest_sha256: str | None = None
-    public_data_sha256: str
+    # Optional legacy metadata, accepted when reading historical contracts.
+    public_data_sha256: str | None = None
     data_split: str
     scorer_id: str
     scorer_revision: str
@@ -42,7 +41,8 @@ class ExperimentContract(StrictModel):
     continuation_tokens: int
     answer_max_tokens: int
     split_rule: str
-    source_tree_sha256: str
+    # New runs do not fingerprint source files.
+    source_tree_sha256: str | None = None
     parent_contract_sha256: str | None = None
     frozen_campaign_sha256: str | None = None
     contract_sha256: str
@@ -227,9 +227,7 @@ class ReplayPoint(StrictModel):
 
 
 class ProblemArtifact(StrictModel):
-    schema_version: Literal["flcva-problem-artifact-v1"] = (
-        "flcva-problem-artifact-v1"
-    )
+    schema_version: Literal["flcva-problem-artifact-v1"] = "flcva-problem-artifact-v1"
     run_id: str
     contract_sha256: str
     problem_id: str

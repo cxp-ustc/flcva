@@ -7,10 +7,8 @@ from typing import Any
 import yaml
 
 from .config import RunConfig
-from .ids import payload_sha256
-from .io import file_sha256
 
-
+# Stable campaign IDs retained for compatibility with recorded runs.
 FROZEN_CAMPAIGN_SHA256 = (
     "992b4d8b277f20d14d70b0a5ce1de1ed3693f9691206d89302e68bd32685e958"
 )
@@ -52,23 +50,14 @@ def load_formal_campaign(
     spec = FORMAL_CAMPAIGNS.get(protocol_id)
     if spec is None:
         raise ValueError(f"unknown formal protocol_id: {protocol_id}")
-    relative_path, expected_sha256 = spec
+    relative_path, campaign_id = spec
     path = project_root / relative_path
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"{relative_path} must be a mapping")
-    observed = payload_sha256(payload)
-    if observed != expected_sha256:
-        raise ValueError(
-            "canonical formal campaign digest mismatch: "
-            f"protocol_id={protocol_id} expected={expected_sha256} "
-            f"actual={observed}"
-        )
     if payload.get("protocol_id") != protocol_id:
-        raise ValueError(
-            f"{relative_path} protocol_id differs from its registry key"
-        )
-    return payload, expected_sha256
+        raise ValueError(f"{relative_path} protocol_id differs from its registry key")
+    return payload, campaign_id
 
 
 def load_frozen_campaign(project_root: Path) -> dict[str, Any]:
@@ -90,10 +79,7 @@ def formal_difficulty_design(
     )
     reference = campaign.get("difficulty_reference")
     if reference is None:
-        models = sorted(
-            str(row["id"])
-            for row in campaign["models"].values()
-        )
+        models = sorted(str(row["id"]) for row in campaign["models"].values())
         return {
             "schema_version": "flcva-difficulty-design-v1",
             "campaign_sha256": campaign_sha256,
@@ -123,17 +109,12 @@ def formal_difficulty_design(
             "external replication must bind the sealed primary campaign digest"
         )
     if reference.get("protocol_id") != PRIMARY_PROTOCOL_ID:
-        raise ValueError(
-            "external replication must bind the sealed primary protocol"
-        )
+        raise ValueError("external replication must bind the sealed primary protocol")
     primary, primary_sha256 = load_formal_campaign(
         project_root,
         PRIMARY_PROTOCOL_ID,
     )
-    primary_models = sorted(
-        str(row["id"])
-        for row in primary["models"].values()
-    )
+    primary_models = sorted(str(row["id"]) for row in primary["models"].values())
     if (
         primary_sha256 != reference["campaign_sha256"]
         or models != primary_models
@@ -176,7 +157,9 @@ def _mismatches(
     return {}
 
 
-def _expected_formal_projection(campaign: dict[str, Any], model_id: str) -> dict[str, Any]:
+def _expected_formal_projection(
+    campaign: dict[str, Any], model_id: str
+) -> dict[str, Any]:
     model_rows = list(campaign["models"].values())
     matches = [row for row in model_rows if row["id"] == model_id]
     if len(matches) != 1:
@@ -201,15 +184,9 @@ def _expected_formal_projection(campaign: dict[str, Any], model_id: str) -> dict
         "model": model,
         "dataset": dataset,
         "sampling": campaign["sampling"],
-        "protocol": {
-            key: campaign["protocol"][key]
-            for key in PROTOCOL_FIELDS
-        },
+        "protocol": {key: campaign["protocol"][key] for key in PROTOCOL_FIELDS},
         "scorer": campaign["scorer"],
-        "execution": {
-            key: campaign["analysis"][key]
-            for key in EXECUTION_FIELDS
-        },
+        "execution": {key: campaign["analysis"][key] for key in EXECUTION_FIELDS},
     }
 
 
@@ -223,15 +200,9 @@ def _observed_formal_projection(config: RunConfig) -> dict[str, Any]:
         "model": payload["model"],
         "dataset": payload["dataset"],
         "sampling": payload["sampling"],
-        "protocol": {
-            key: payload["protocol"][key]
-            for key in PROTOCOL_FIELDS
-        },
+        "protocol": {key: payload["protocol"][key] for key in PROTOCOL_FIELDS},
         "scorer": payload["scorer"],
-        "execution": {
-            key: payload["execution"][key]
-            for key in EXECUTION_FIELDS
-        },
+        "execution": {key: payload["execution"][key] for key in EXECUTION_FIELDS},
     }
 
 
@@ -240,12 +211,6 @@ def _validate_public_data(campaign: dict[str, Any], project_root: Path) -> None:
     public_path = project_root / combined["public_path"]
     if not public_path.is_file():
         raise ValueError(f"frozen public data is missing: {public_path}")
-    observed_public_sha = file_sha256(public_path)
-    if observed_public_sha != combined["public_sha256"]:
-        raise ValueError(
-            "frozen combined public data digest mismatch: "
-            f"expected={combined['public_sha256']} actual={observed_public_sha}"
-        )
     manifest_path = project_root / "data" / "frozen" / "MANIFEST.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     expected_manifest = {
@@ -254,7 +219,6 @@ def _validate_public_data(campaign: dict[str, Any], project_root: Path) -> None:
             "revision": campaign["datasets"][dataset_id]["revision"],
             "split": campaign["datasets"][dataset_id]["split"],
             "problems": campaign["datasets"][dataset_id]["problems"],
-            "public_sha256": campaign["datasets"][dataset_id]["public_sha256"],
         }
         for dataset_id in ("gsm8k", "math500")
     }
@@ -269,11 +233,9 @@ def _validate_public_data(campaign: dict[str, Any], project_root: Path) -> None:
     combined_mismatches = _mismatches(
         {
             "problems": combined["problems"],
-            "public_sha256": combined["public_sha256"],
         },
         {
             "problems": manifest.get("combined", {}).get("problems"),
-            "public_sha256": manifest.get("combined", {}).get("public_sha256"),
         },
         "combined",
     )

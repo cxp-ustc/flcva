@@ -50,13 +50,8 @@ def _invariants(config: dict[str, Any]) -> dict[str, Any]:
 SNAPSHOT_IDENTITY_KEYS = (
     "expected_revision",
     "revision_evidence",
-    "transport_attestation_sha256",
     "transport_requested_revision",
     "transport_resolution_mode",
-    "transport_metadata_sha256",
-    "config_sha256",
-    "tokenizer_config_sha256",
-    "weight_layout_sha256",
 )
 
 
@@ -81,9 +76,7 @@ def merge_runs(
         if not verify_sealed_record(manifest):
             raise ValueError(f"parent manifest hash mismatch: {input_dir}")
     parent_records = [
-        RunRecord.model_validate_json(
-            (path / "run.json").read_text(encoding="utf-8")
-        )
+        RunRecord.model_validate_json((path / "run.json").read_text(encoding="utf-8"))
         for path in input_dirs
     ]
     for input_dir, manifest, record in zip(
@@ -108,13 +101,9 @@ def merge_runs(
             raise ValueError(
                 f"parent manifest does not bind runtime environment: {input_dir}"
             )
-    runtime_digests = {
-        record.runtime_environment_sha256 for record in parent_records
-    }
+    runtime_digests = {record.runtime_environment_sha256 for record in parent_records}
     if len(runtime_digests) != 1:
-        raise ValueError(
-            "input shards were produced by different runtime environments"
-        )
+        raise ValueError("input shards were produced by different runtime environments")
     formal_preflights: dict[Path, dict[str, Any]] = {}
     if config.stage == "formal":
         for input_dir, manifest, record in zip(
@@ -143,10 +132,10 @@ def merge_runs(
                     f"formal parent preflight identity mismatch: {input_dir}"
                 )
             runtime = preflight.get("runtime", {})
-            if (
-                runtime.get("environment_sha256")
-                != record.runtime_environment_sha256
-                or not runtime.get("gpu_model_checks")
+            if runtime.get(
+                "environment_sha256"
+            ) != record.runtime_environment_sha256 or not runtime.get(
+                "gpu_model_checks"
             ):
                 raise ValueError(
                     f"formal parent preflight/runtime mismatch: {input_dir}"
@@ -175,8 +164,7 @@ def merge_runs(
                 manifest.get("contract_sha256") != recorded_contract_sha
                 or parent_contract.config_sha256
                 != payload_sha256(manifest.get("config", {}))
-                or parent_contract.frozen_campaign_sha256
-                != frozen_campaign_sha256
+                or parent_contract.frozen_campaign_sha256 != frozen_campaign_sha256
             ):
                 raise ValueError(
                     f"parent run differs from frozen campaign contract: {input_dir}"
@@ -226,12 +214,12 @@ def merge_runs(
                 for path in sorted((input_dir / "scores").glob("*.json.gz"))
             ]
             if any(not verify_sealed_record(payload) for payload in score_payloads):
-                raise ValueError(f"formal input has a corrupt score artifact: {input_dir}")
+                raise ValueError(
+                    f"formal input has a corrupt score artifact: {input_dir}"
+                )
             score_ids = {str(payload["problem_id"]) for payload in score_payloads}
             if score_ids != set(manifest["problem_ids"]):
-                raise ValueError(
-                    f"formal input score set is incomplete: {input_dir}"
-                )
+                raise ValueError(f"formal input score set is incomplete: {input_dir}")
             expected_scorer = formal_preflights[input_dir]["runtime"][
                 "gpu_model_checks"
             ]["scorer"]
@@ -247,11 +235,7 @@ def merge_runs(
     output_dir.mkdir(parents=True, exist_ok=True)
     contract = materialize_contract(config, project_root, output_dir)
     parent_task_ids = sorted(
-        {
-            str(record.task_id)
-            for record in parent_records
-            if record.task_id
-        }
+        {str(record.task_id) for record in parent_records if record.task_id}
     )
     run_record = reseal_run_record(
         new_run_record(config, contract),
@@ -312,9 +296,9 @@ def merge_runs(
             ),
             "runtime_scorer_identity": (
                 _snapshot_identity(
-                    formal_preflights[input_dir]["runtime"][
-                        "gpu_model_checks"
-                    ]["scorer"]
+                    formal_preflights[input_dir]["runtime"]["gpu_model_checks"][
+                        "scorer"
+                    ]
                 )
                 if config.stage == "formal"
                 else None

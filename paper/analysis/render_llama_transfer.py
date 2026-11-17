@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -21,12 +20,11 @@ from flcva.frozen import (
 )
 from flcva.ids import payload_sha256
 from flcva.io import (
-    file_sha256,
+    require_artifacts,
     seal_record,
     verify_sealed_record,
 )
 from paper.analysis import render_supplement as supplement
-
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "paper" / "generated" / "llama_replication"
@@ -54,10 +52,7 @@ def _validate_llama(run_dir: Path) -> dict[str, Any]:
     manifest = _read(run_dir / "manifest.json")
     audit = _read(run_dir / "audit_manifest.json")
     evaluation = _read(run_dir / "evaluation" / "summary.json")
-    if not all(
-        verify_sealed_record(row)
-        for row in (manifest, audit, evaluation)
-    ):
+    if not all(verify_sealed_record(row) for row in (manifest, audit, evaluation)):
         raise ValueError("Llama replication seal verification failed")
     config = RunConfig.model_validate(manifest["config"])
     campaign_sha256 = validate_formal_manifest_config(
@@ -74,10 +69,7 @@ def _validate_llama(run_dir: Path) -> dict[str, Any]:
         or evaluation.get("difficulty_current_outcomes_excluded") is not True
     ):
         raise ValueError("run is not an audited external Llama replication")
-    for relative, expected in evaluation["artifacts_sha256"].items():
-        path = run_dir / "evaluation" / relative
-        if not path.is_file() or file_sha256(path) != expected:
-            raise ValueError(f"Llama evaluation artifact mismatch: {path}")
+    require_artifacts(run_dir / "evaluation", evaluation)
     return {
         "run_dir": run_dir,
         "run": {"run_id": config.run_id},
@@ -125,8 +117,8 @@ def _score_maps(
         model=model_key,
         raw_features=raw_features,
     )
-    moments, serialized_moments = (
-        supplement._stratified_continuation_moments(primary_analysis)
+    moments, serialized_moments = supplement._stratified_continuation_moments(
+        primary_analysis
     )
     maps: dict[str, dict[str, float]] = {
         "correctness_stratified_ev": {},
@@ -136,9 +128,7 @@ def _score_maps(
     for row in llama_confirmation:
         checkpoint_id = str(row["checkpoint_id"])
         q = q_map[checkpoint_id]
-        stratum = moments[
-            (str(row["dataset_id"]), int(row["depth"]))
-        ]
+        stratum = moments[(str(row["dataset_id"]), int(row["depth"]))]
         cost = float(stratum["mean_branch_cost"])
         maps["correctness_stratified_ev"][checkpoint_id] = (
             1000.0
@@ -150,10 +140,7 @@ def _score_maps(
         )
         maps["two_stage_ev"][checkpoint_id] = (
             1000.0
-            * (
-                q * recovery_map[checkpoint_id]
-                - (1.0 - q) * damage_map[checkpoint_id]
-            )
+            * (q * recovery_map[checkpoint_id] - (1.0 - q) * damage_map[checkpoint_id])
             / cost
         )
     return maps, {
@@ -186,18 +173,11 @@ def _replay(
     problem_rows: list[dict[str, Any]] = []
     compact_contexts: list[supplement.CompactReplayContext] = []
     for spine_id in range(4):
-        selected = [
-            state
-            for state in states
-            if int(state["spine_id"]) == spine_id
-        ]
+        selected = [state for state in states if int(state["spine_id"]) == spine_id]
         compact_contexts.append(
             supplement._build_compact_replay_context(
                 selected,
-                {
-                    policy: score_maps[policy]
-                    for policy in POLICIES[1:]
-                },
+                {policy: score_maps[policy] for policy in POLICIES[1:]},
             )
         )
         traces = {
@@ -205,9 +185,7 @@ def _replay(
                 selected,
                 "round_robin",
                 checkpoint_interval=config.protocol.checkpoint_interval,
-                fixed_allotment_tokens=(
-                    config.execution.fixed_allotment_tokens
-                ),
+                fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
             )
         }
         for policy in POLICIES[1:]:
@@ -215,9 +193,7 @@ def _replay(
                 selected,
                 "oracle",
                 checkpoint_interval=config.protocol.checkpoint_interval,
-                fixed_allotment_tokens=(
-                    config.execution.fixed_allotment_tokens
-                ),
+                fixed_allotment_tokens=(config.execution.fixed_allotment_tokens),
                 overridden_values=score_maps[policy],
             )
         start_budget = traces["round_robin"][0][0].budget
@@ -272,25 +248,17 @@ def _summarize(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
     for row in problem_rows:
-        grouped[
-            (str(row["policy"]), str(row["problem_id"]))
-        ].append(float(row["normalized_aulc"]))
-    problem_ids = sorted(
-        {
-            problem_id
-            for _, problem_id in grouped
-        }
-    )
+        grouped[(str(row["policy"]), str(row["problem_id"]))].append(
+            float(row["normalized_aulc"])
+        )
+    problem_ids = sorted({problem_id for _, problem_id in grouped})
     if len(problem_ids) != 372:
         raise ValueError(
             f"expected 372 confirmation problems, observed {len(problem_ids)}"
         )
     vectors: dict[str, np.ndarray] = {}
     for policy in POLICIES:
-        if any(
-            len(grouped[(policy, problem_id)]) != 4
-            for problem_id in problem_ids
-        ):
+        if any(len(grouped[(policy, problem_id)]) != 4 for problem_id in problem_ids):
             raise ValueError("transfer replay lacks four spine repetitions")
         vectors[policy] = np.asarray(
             [
@@ -331,16 +299,8 @@ def _summarize(
     rows: list[dict[str, Any]] = []
     for policy in POLICIES:
         policy_samples = bootstrap_samples[policy]
-        versus_rr = (
-            100.0
-            * (policy_samples - round_robin_samples)
-            / round_robin_samples
-        )
-        versus_shortcut = (
-            100.0
-            * (policy_samples - shortcut_samples)
-            / shortcut_samples
-        )
+        versus_rr = 100.0 * (policy_samples - round_robin_samples) / round_robin_samples
+        versus_shortcut = 100.0 * (policy_samples - shortcut_samples) / shortcut_samples
         point_vs_rr = (
             100.0
             * (observed[policy] - observed["round_robin"])
@@ -348,19 +308,14 @@ def _summarize(
         )
         point_vs_shortcut = (
             100.0
-            * (
-                observed[policy]
-                - observed["correctness_stratified_ev"]
-            )
+            * (observed[policy] - observed["correctness_stratified_ev"])
             / observed["correctness_stratified_ev"]
         )
         rows.append(
             {
                 "model": MODEL,
                 "policy": policy,
-                "analysis_status": (
-                    "paired full-system problem bootstrap"
-                ),
+                "analysis_status": ("paired full-system problem bootstrap"),
                 "training_models": [
                     "Qwen3-8B",
                     "DeepSeek-R1-Distill-Qwen-7B",
@@ -370,16 +325,10 @@ def _summarize(
                 "spine_repetitions": 4,
                 "mean_normalized_aulc": observed[policy],
                 "gain_vs_round_robin_percent": point_vs_rr,
-                "gain_vs_round_robin_low": float(
-                    np.quantile(versus_rr, 0.025)
-                ),
-                "gain_vs_round_robin_high": float(
-                    np.quantile(versus_rr, 0.975)
-                ),
+                "gain_vs_round_robin_low": float(np.quantile(versus_rr, 0.025)),
+                "gain_vs_round_robin_high": float(np.quantile(versus_rr, 0.975)),
                 "increment_vs_shortcut_percent": point_vs_shortcut,
-                "increment_vs_shortcut_low": float(
-                    np.quantile(versus_shortcut, 0.025)
-                ),
+                "increment_vs_shortcut_low": float(np.quantile(versus_shortcut, 0.025)),
                 "increment_vs_shortcut_high": float(
                     np.quantile(versus_shortcut, 0.975)
                 ),
@@ -394,22 +343,13 @@ def _summarize(
             "independent replay identities with shared sampled source data"
         ),
         "unique_source_problems": {
-            "min": min(
-                int(row["unique_source_problems"])
-                for row in bootstrap_rows
-            ),
+            "min": min(int(row["unique_source_problems"]) for row in bootstrap_rows),
             "median": float(
                 np.median(
-                    [
-                        int(row["unique_source_problems"])
-                        for row in bootstrap_rows
-                    ]
+                    [int(row["unique_source_problems"]) for row in bootstrap_rows]
                 )
             ),
-            "max": max(
-                int(row["unique_source_problems"])
-                for row in bootstrap_rows
-            ),
+            "max": max(int(row["unique_source_problems"]) for row in bootstrap_rows),
         },
     }
     return rows, bootstrap_rows, metadata
@@ -445,9 +385,7 @@ def render(llama_run: Path) -> dict[str, Any]:
         llama["run_dir"],
         llama["evaluation"],
     )
-    llama_confirmation = [
-        row for row in llama_values if row["split"] == "confirmation"
-    ]
+    llama_confirmation = [row for row in llama_values if row["split"] == "confirmation"]
     score_maps, fits = _score_maps(
         primary_analysis,
         llama_confirmation,
@@ -490,10 +428,7 @@ def render(llama_run: Path) -> dict[str, Any]:
         r"\small",
         r"\begin{tabular}{lrr}",
         r"\toprule",
-        (
-            r"Policy & Gain vs.\ RR (95\% CI) & "
-            r"Increment vs.\ shortcut (95\% CI) \\"
-        ),
+        (r"Policy & Gain vs.\ RR (95\% CI) & " r"Increment vs.\ shortcut (95\% CI) \\"),
         r"\midrule",
     ]
     for row in summary_rows:
@@ -545,9 +480,7 @@ def render(llama_run: Path) -> dict[str, Any]:
         {
             "schema_version": "flcva-controller-transfer-manifest-v2",
             "transfer_id": TRANSFER_ID,
-            "analysis_status": (
-                "post-seal external architecture replication"
-            ),
+            "analysis_status": ("post-seal external architecture replication"),
             "training_models": sorted(primary),
             "target_model": MODEL,
             "target_run_id": llama["run"]["run_id"],
@@ -576,17 +509,13 @@ def render(llama_run: Path) -> dict[str, Any]:
             "primary_source_runs": {
                 model: {
                     "run_id": payload["run"]["run_id"],
-                    "result_merkle_root": payload["audit"][
-                        "result_merkle_root"
-                    ],
+                    "result_merkle_root": payload["audit"]["result_merkle_root"],
                 }
                 for model, payload in primary.items()
             },
-            "target_result_merkle_root": llama["audit"][
-                "result_merkle_root"
-            ],
-            "artifacts_sha256": {
-                path.name: file_sha256(path)
+            "target_result_merkle_root": llama["audit"]["result_merkle_root"],
+            "artifacts": [
+                path.name
                 for path in (
                     seed_path,
                     problem_path,
@@ -595,8 +524,7 @@ def render(llama_run: Path) -> dict[str, Any]:
                     fits_path,
                     table_path,
                 )
-            },
-            "source_sha256": file_sha256(Path(__file__)),
+            ],
             "summary_rows_sha256": payload_sha256(summary_rows),
         }
     )

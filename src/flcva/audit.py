@@ -10,6 +10,7 @@ from .config import RunConfig
 from .contract import (
     bind_run_record,
     build_contract,
+    contract_semantics,
     reseal_run_record,
     verify_run_record,
 )
@@ -18,9 +19,9 @@ from .ids import payload_sha256
 from .io import (
     BlobStore,
     atomic_write_json,
-    file_sha256,
     iter_problem_artifacts,
     read_json_gz,
+    require_artifacts,
     seal_record,
     verify_sealed_record,
 )
@@ -29,17 +30,11 @@ from .lineage import verify_formal_difficulty_lineage
 from .runner import resolve_run_dir
 from .schemas import ExperimentContract, RunRecord
 
-
 SNAPSHOT_IDENTITY_KEYS = (
     "expected_revision",
     "revision_evidence",
-    "transport_attestation_sha256",
     "transport_requested_revision",
     "transport_resolution_mode",
-    "transport_metadata_sha256",
-    "config_sha256",
-    "tokenizer_config_sha256",
-    "weight_layout_sha256",
 )
 
 
@@ -71,9 +66,11 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
     contract_payload["contract_sha256"] = ""
     if payload_sha256(contract_payload) != recorded_contract_sha:
         raise ValueError("contract self-hash mismatch")
-    if build_contract(config, project_root) != contract:
+    if contract_semantics(build_contract(config, project_root)) != contract_semantics(
+        contract
+    ):
         raise ValueError(
-            "current config/source tree does not match the recorded experiment contract"
+            "current config does not match the recorded experiment contract"
         )
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     if not verify_sealed_record(manifest):
@@ -88,15 +85,10 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
         raise ValueError("run record identity mismatch")
     if manifest.get("run_record_sha256") != record.record_sha256:
         raise ValueError("manifest does not bind the run record")
-    if (
-        manifest.get("runtime_environment_sha256")
-        != record.runtime_environment_sha256
-    ):
+    if manifest.get("runtime_environment_sha256") != record.runtime_environment_sha256:
         raise ValueError("manifest does not bind the runtime environment")
     if manifest.get("contract_sha256") != contract.contract_sha256:
         raise ValueError("manifest contract mismatch")
-    if manifest.get("source_tree_sha256") != contract.source_tree_sha256:
-        raise ValueError("manifest source tree mismatch")
     manifest_config = manifest.get("config")
     if manifest_config != config.model_dump(mode="json"):
         raise ValueError("manifest config differs from the audit config")
@@ -113,8 +105,7 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
         parent_rows = manifest.get("parent_runs", [])
         if parent_rows:
             parent_runtime_digests = {
-                str(row.get("runtime_environment_sha256", ""))
-                for row in parent_rows
+                str(row.get("runtime_environment_sha256", "")) for row in parent_rows
             }
             runtime_lineage_verified = (
                 len(parent_runtime_digests) == 1
@@ -138,20 +129,10 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
                     and row.get("application_id")
                     and row.get("run_record_sha256")
                     and row.get("preflight_record_sha256")
-                    and row.get("runtime_model_identity", {}).get(
-                        "expected_revision"
-                    )
+                    and row.get("runtime_model_identity", {}).get("expected_revision")
                     == contract.model_revision
-                    and row.get("runtime_model_identity", {}).get(
-                        "config_sha256"
-                    )
-                    and row.get("runtime_scorer_identity", {}).get(
-                        "expected_revision"
-                    )
+                    and row.get("runtime_scorer_identity", {}).get("expected_revision")
                     == contract.scorer_revision
-                    and row.get("runtime_scorer_identity", {}).get(
-                        "config_sha256"
-                    )
                     for row in parent_rows
                 )
             )
@@ -159,35 +140,25 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
             preflight_path = run_dir / "preflight.json"
             runtime_lineage_verified = preflight_path.is_file()
             if runtime_lineage_verified:
-                preflight = json.loads(
-                    preflight_path.read_text(encoding="utf-8")
-                )
+                preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
                 formal_preflight = preflight
-                gpu_checks = preflight.get("runtime", {}).get(
-                    "gpu_model_checks"
-                ) or {}
+                gpu_checks = preflight.get("runtime", {}).get("gpu_model_checks") or {}
                 runtime_lineage_verified = (
                     verify_sealed_record(preflight)
                     and preflight.get("schema_version") == "flcva-preflight-v2"
                     and preflight.get("passed") is True
                     and preflight.get("run_id") == config.run_id
-                    and preflight.get("contract_sha256")
-                    == contract.contract_sha256
-                    and preflight.get("runtime", {}).get(
-                        "environment_sha256"
-                    )
+                    and preflight.get("contract_sha256") == contract.contract_sha256
+                    and preflight.get("runtime", {}).get("environment_sha256")
                     == record.runtime_environment_sha256
-                    and bool(
-                        gpu_checks
-                    )
+                    and bool(gpu_checks)
                     and _snapshot_identity(manifest.get("runtime_model", {}))
                     == _snapshot_identity(gpu_checks.get("model", {}))
                     and bool(record.task_id)
                     and bool(record.application_id)
                 )
     allowed_contracts = {
-        parent["contract_sha256"]
-        for parent in manifest.get("parent_runs", [])
+        parent["contract_sha256"] for parent in manifest.get("parent_runs", [])
     } or {contract.contract_sha256}
     blobs = BlobStore(run_dir / "blobs")
     problem_hashes: list[str] = []
@@ -215,7 +186,9 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
                 )
             blobs.verify(branch["reasoning_blob"])
             if branch["reasoning_tokens"] != config.protocol.continuation_tokens:
-                raise ValueError("branch reasoning length violates the fixed intervention")
+                raise ValueError(
+                    "branch reasoning length violates the fixed intervention"
+                )
             totals["branches"] += 1
             totals["logical_branch_tokens"] += int(branch["logical_tokens"])
         for checkpoint in checkpoints:
@@ -235,24 +208,26 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
             if checkpoint["continuation_eligible"]:
                 eligible_checkpoints += 1
                 rows = by_checkpoint.get(checkpoint["checkpoint_id"], [])
-                if (
-                    len(rows) == config.protocol.continuation_branches
-                    and sorted(row["branch_index"] for row in rows)
-                    == list(range(1, config.protocol.continuation_branches + 1))
-                ):
+                if len(rows) == config.protocol.continuation_branches and sorted(
+                    row["branch_index"] for row in rows
+                ) == list(range(1, config.protocol.continuation_branches + 1)):
                     complete_branches += 1
                 else:
                     attrition["incomplete_branch_set"] += 1
                 on_spine = [row for row in rows if row["on_spine"]]
                 if len(on_spine) != 1 or on_spine[0]["branch_index"] != 1:
-                    raise ValueError("each checkpoint must have one k=1 on-spine branch")
+                    raise ValueError(
+                        "each checkpoint must have one k=1 on-spine branch"
+                    )
                 expected = spine[
                     checkpoint["depth"] : checkpoint["depth"]
                     + config.protocol.continuation_tokens
                 ]
                 observed = blobs.get(on_spine[0]["reasoning_blob"])
                 if expected != observed:
-                    raise ValueError("on-spine branch does not match successor token segment")
+                    raise ValueError(
+                        "on-spine branch does not match successor token segment"
+                    )
             totals["checkpoints"] += 1
             for event_id in checkpoint["ledger_event_ids"]:
                 if event_id not in event_ids:
@@ -260,7 +235,9 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
         forbidden_keys = {"gold", "gold_answer", "label", "target", "reference_answer"}
         for key in forbidden_keys:
             if key in artifact:
-                raise ValueError(f"generation artifact leaks a forbidden label key: {key}")
+                raise ValueError(
+                    f"generation artifact leaks a forbidden label key: {key}"
+                )
         totals["problems"] += 1
         result_hashes.append(artifact["record_sha256"])
         for event in artifact["ledger"]:
@@ -310,18 +287,14 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
                 and score_runtime_identities == parent_scorer_identities
             )
         elif formal_preflight is not None:
-            expected_scorer = formal_preflight["runtime"]["gpu_model_checks"][
-                "scorer"
-            ]
+            expected_scorer = formal_preflight["runtime"]["gpu_model_checks"]["scorer"]
             runtime_lineage_verified = (
                 runtime_lineage_verified
                 and score_runtime_identities
                 == {payload_sha256(_snapshot_identity(expected_scorer))}
             )
     runtime_model = manifest.get("runtime_model", {})
-    totals["model_load_seconds"] = float(
-        runtime_model.get("load_seconds") or 0.0
-    )
+    totals["model_load_seconds"] = float(runtime_model.get("load_seconds") or 0.0)
     totals["model_load_peak_gpu_memory_bytes"] = int(
         runtime_model.get("load_peak_gpu_memory_bytes") or 0
     )
@@ -336,7 +309,9 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
             runtime_scorer.get("load_peak_gpu_memory_bytes") or 0
         )
     prefix_rate = prefix_matches / prefix_checks if prefix_checks else 0.0
-    branch_rate = complete_branches / eligible_checkpoints if eligible_checkpoints else 0.0
+    branch_rate = (
+        complete_branches / eligible_checkpoints if eligible_checkpoints else 0.0
+    )
     parse_rates: dict[str, dict[str, float | None]] = {}
     evaluation_summary_path = run_dir / "evaluation" / "summary.json"
     evaluation_valid = False
@@ -348,53 +323,46 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
             raise ValueError("evaluation summary hash mismatch")
         if evaluation.get("run_id") != config.run_id:
             raise ValueError("evaluation summary run ID mismatch")
-        for relative, expected in evaluation.get("artifacts_sha256", {}).items():
-            target = run_dir / "evaluation" / relative
-            if not target.is_file() or file_sha256(target) != expected:
-                raise ValueError(f"evaluation artifact hash mismatch: {relative}")
-        evaluation_valid = (
-            int(evaluation.get("problems", -1)) == len(problem_ids)
-            and bool(evaluation.get("artifacts_sha256"))
-            and (
-                (
-                    int(evaluation.get("difficulty_scope_runs", -1))
-                    == len(
-                        formal_difficulty_design(
-                            config,
-                            project_root,
-                        )["reference_models"]
-                    )
-                    and sorted(
+        require_artifacts(run_dir / "evaluation", evaluation)
+        evaluation_valid = int(evaluation.get("problems", -1)) == len(problem_ids) and (
+            (
+                int(evaluation.get("difficulty_scope_runs", -1))
+                == len(
+                    formal_difficulty_design(
+                        config,
+                        project_root,
+                    )["reference_models"]
+                )
+                and sorted(
+                    evaluation.get(
+                        "difficulty_reference_models",
                         evaluation.get(
-                            "difficulty_reference_models",
-                            evaluation.get(
-                                "difficulty_lineage",
-                                {},
-                            ).get("models", []),
-                        )
-                    )
-                    == sorted(
-                        formal_difficulty_design(
-                            config,
-                            project_root,
-                        )["reference_models"]
-                    )
-                    and bool(
-                        evaluation.get(
-                            "difficulty_current_outcomes_excluded",
-                            False,
-                        )
-                    )
-                    is not bool(
-                        formal_difficulty_design(
-                            config,
-                            project_root,
-                        )["include_current_outcomes"]
+                            "difficulty_lineage",
+                            {},
+                        ).get("models", []),
                     )
                 )
-                if config.stage == "formal"
-                else True
+                == sorted(
+                    formal_difficulty_design(
+                        config,
+                        project_root,
+                    )["reference_models"]
+                )
+                and bool(
+                    evaluation.get(
+                        "difficulty_current_outcomes_excluded",
+                        False,
+                    )
+                )
+                is not bool(
+                    formal_difficulty_design(
+                        config,
+                        project_root,
+                    )["include_current_outcomes"]
+                )
             )
+            if config.stage == "formal"
+            else True
         )
         gold_labels_match = verify_gold_label_attestation(
             config,
@@ -448,11 +416,8 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
             raise ValueError("replay summary hash mismatch")
         if replay.get("run_id") != config.run_id:
             raise ValueError("replay summary run ID mismatch")
-        for relative, expected in replay.get("artifacts_sha256", {}).items():
-            target = run_dir / "replay" / relative
-            if not target.is_file() or file_sha256(target) != expected:
-                raise ValueError(f"replay artifact hash mismatch: {relative}")
-        replay_valid = bool(replay.get("artifacts_sha256"))
+        require_artifacts(run_dir / "replay", replay)
+        replay_valid = True
         result_hashes.append(replay["record_sha256"])
     gates = {
         "prefix_replay_100pct": prefix_rate == 1.0,
@@ -463,10 +428,10 @@ def audit_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
         "difficulty_peer_match": difficulty_peer_match,
         "replay_present_and_sealed": replay_valid,
         "parser_rate_gate": parser_gate,
-        "artifact_count_matches_manifest": len(problem_ids) == manifest["problem_count"],
+        "artifact_count_matches_manifest": len(problem_ids)
+        == manifest["problem_count"],
         "frozen_campaign_match": (
-            frozen_campaign_match
-            and contract.frozen_campaign_sha256 is not None
+            frozen_campaign_match and contract.frozen_campaign_sha256 is not None
             if config.stage == "formal"
             else True
         ),

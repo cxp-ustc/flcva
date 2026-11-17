@@ -16,13 +16,11 @@ from .ids import stable_seed
 from .io import (
     atomic_write_json,
     atomic_write_jsonl_gz,
-    file_sha256,
     iter_jsonl_gz,
     seal_record,
 )
 from .runner import resolve_run_dir
 from .schemas import ReplayPoint
-
 
 SCHEDULERS = (
     "fixed_1024",
@@ -112,9 +110,7 @@ def _score(state: dict[str, Any], scheduler: str) -> float:
         # value as -inf makes the first advanced frontier monopolize the heap
         # and degenerates TRACE into an ID-ordered serial scheduler.  Sum only
         # the observable components and record this policy in the replay seal.
-        return (
-            (1.0 - float(persistence)) if persistence is not None else 0.0
-        ) + (
+        return ((1.0 - float(persistence)) if persistence is not None else 0.0) + (
             (1.0 - float(confidence)) if confidence is not None else 0.0
         )
     if scheduler == "agreement":
@@ -171,8 +167,7 @@ def _initial_proxy_cost(
     if scheduler != "prm":
         return 0
     return sum(
-        int((state.get("proxy_costs") or {}).get("prm_min_step", 0))
-        for state in states
+        int((state.get("proxy_costs") or {}).get("prm_min_step", 0)) for state in states
     )
 
 
@@ -221,9 +216,7 @@ def _replay_one(
 ) -> list[ReplayPoint]:
     by_id = {state["checkpoint_id"]: dict(state) for state in states}
     first_states = [
-        state
-        for state in states
-        if int(state["depth"]) == checkpoint_interval
+        state for state in states if int(state["depth"]) == checkpoint_interval
     ]
     frontiers = {
         (state["problem_id"], int(state["spine_id"])): Frontier(
@@ -236,8 +229,7 @@ def _replay_one(
         raise ValueError("replay has no initial frontiers")
     total_frontiers = len(frontiers)
     correct_count = sum(
-        int(bool(frontier.state["stop_correct"]))
-        for frontier in frontiers.values()
+        int(bool(frontier.state["stop_correct"])) for frontier in frontiers.values()
     )
     active_keys = {
         key for key, frontier in frontiers.items() if not frontier.state["terminal"]
@@ -272,9 +264,7 @@ def _replay_one(
     queue = deque(ordered_keys)
     fixed_key_index = 0
     fixed_remaining = max(1, fixed_allotment_tokens // checkpoint_interval)
-    priority_heap: list[
-        tuple[float, int, _DescendingText, str, tuple[str, int]]
-    ] = []
+    priority_heap: list[tuple[float, int, _DescendingText, str, tuple[str, int]]] = []
 
     def push_priority(key: tuple[str, int]) -> None:
         state = frontiers[key].state
@@ -334,13 +324,13 @@ def _replay_one(
         current = frontiers[chosen].state
         successor_id = current.get("successor_id")
         if not successor_id or successor_id not in by_id:
-            raise ValueError(f"frontier successor is missing: {current['checkpoint_id']}")
+            raise ValueError(
+                f"frontier successor is missing: {current['checkpoint_id']}"
+            )
         successor = dict(by_id[successor_id])
         budget += _transition_cost(current)
         if scheduler == "prm":
-            budget += int(
-                (successor.get("proxy_costs") or {}).get("prm_min_step", 0)
-            )
+            budget += int((successor.get("proxy_costs") or {}).get("prm_min_step", 0))
         frontiers[chosen].state = successor
         correct_count += int(bool(successor["stop_correct"])) - int(
             bool(current["stop_correct"])
@@ -393,7 +383,9 @@ def _permuted_oracle(
             values = [float(row["marginal_value"]) for row in group]
             if len(group) >= 2 and len(set(values)) >= 2:
                 rng = random.Random(
-                    stable_seed(config.global_seed, "permutation", permutation_index, *key)
+                    stable_seed(
+                        config.global_seed, "permutation", permutation_index, *key
+                    )
                 )
                 rng.shuffle(values)
             for row, value in zip(
@@ -409,8 +401,7 @@ def _permuted_oracle(
             overridden_values=assigned,
         )
         differences.append(
-            step_auc(points, endpoint, start_budget=start_budget)
-            - round_robin_auc
+            step_auc(points, endpoint, start_budget=start_budget) - round_robin_auc
         )
     array = np.asarray(differences, dtype=float)
     return {
@@ -545,9 +536,7 @@ def replay_run(config: RunConfig, project_root: Path) -> dict[str, Any]:
             "aulc": aulc,
             "oracle_difference": original_difference,
             "permutation_oracle": permutation,
-            "artifacts_sha256": {
-                str(points_path.relative_to(replay_dir)): file_sha256(points_path),
-            },
+            "artifacts": [str(points_path.relative_to(replay_dir))],
         }
     )
     atomic_write_json(replay_dir / "summary.json", summary)

@@ -27,12 +27,15 @@ def _atomic_replace(path: Path, payload: bytes) -> None:
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-    ).encode("utf-8") + b"\n"
+    encoded = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        ).encode("utf-8")
+        + b"\n"
+    )
     _atomic_replace(path, encoded)
 
 
@@ -52,9 +55,7 @@ def read_json_gz(path: Path) -> Any:
 
 
 def atomic_write_jsonl_gz(path: Path, records: Iterable[Any]) -> None:
-    lines = b"".join(
-        canonical_json_bytes(record) + b"\n" for record in records
-    )
+    lines = b"".join(canonical_json_bytes(record) + b"\n" for record in records)
     _atomic_replace(path, gzip.compress(lines, mtime=0))
 
 
@@ -69,12 +70,26 @@ def iter_jsonl_gz(path: Path) -> Iterator[dict[str, Any]]:
             yield payload
 
 
-def file_sha256(path: Path) -> str:
-    digest = __import__("hashlib").sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def listed_artifacts(summary: dict[str, Any]) -> list[str]:
+    """Read output paths, including lists from historical result summaries."""
+    paths = summary.get("artifacts")
+    if paths is None:
+        paths = list(summary.get("artifacts_sha256", {}))
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        raise ValueError("artifact paths must be a list of strings")
+    return paths
+
+
+def require_artifacts(root: Path, summary: dict[str, Any]) -> list[str]:
+    """Require listed outputs to exist; contents are checked by their readers."""
+    paths = listed_artifacts(summary)
+    if not paths:
+        raise ValueError(f"no artifact paths listed: {root}")
+    for relative in paths:
+        target = root / relative
+        if not target.is_file():
+            raise FileNotFoundError(f"missing artifact: {target}")
+    return paths
 
 
 class BlobStore:
@@ -107,7 +122,10 @@ class BlobStore:
 
 
 def problem_artifact_path(run_dir: Path, problem_id: str) -> Path:
-    safe = "".join(character if character.isalnum() or character in "._-" else "_" for character in problem_id)
+    safe = "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in problem_id
+    )
     return run_dir / "problems" / f"{safe}.json.gz"
 
 

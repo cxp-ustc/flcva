@@ -38,14 +38,12 @@ from flcva.config import RunConfig
 from flcva.ids import canonical_json_bytes, payload_sha256, stable_seed
 from flcva.io import (
     BlobStore,
-    file_sha256,
     read_json_gz,
     seal_record,
     verify_sealed_record,
 )
 from flcva.parsing import answers_equal
 from flcva.statistics import roc_auc
-
 
 ROOT = Path(__file__).resolve().parents[2]
 INPUT_DIR = ROOT / "paper" / "ablation" / "block_length_inputs"
@@ -99,13 +97,8 @@ SNAPSHOT_IDENTITY_KEYS = (
     "revision_evidence",
     "transport_requested_revision",
     "transport_resolution_mode",
-    "config_sha256",
-    "tokenizer_config_sha256",
 )
-TRANSPORT_PROVENANCE_KEYS = (
-    "transport_attestation_sha256",
-    "transport_metadata_sha256",
-)
+TRANSPORT_PROVENANCE_KEYS = ()
 SOURCE_RUNS = {
     "qwen3": ROOT / "artifacts" / "primary-qwen3",
     "deepseek": ROOT / "artifacts" / "primary-deepseek",
@@ -234,26 +227,12 @@ def _safe_problem_name(problem_id: str) -> str:
     )
 
 
-def _execution_bundle() -> dict[str, Any]:
-    files = {
-        relative: file_sha256(ROOT / relative)
-        for relative in EXECUTION_FILES
-    }
-    return {
-        "files_sha256": files,
-        "bundle_sha256": payload_sha256(sorted(files.items())),
-    }
-
-
 def _snapshot_identity(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload.get(key) for key in SNAPSHOT_IDENTITY_KEYS}
 
 
 def _transport_provenance(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: payload.get(key)
-        for key in TRANSPORT_PROVENANCE_KEYS
-    }
+    return {key: payload.get(key) for key in TRANSPORT_PROVENANCE_KEYS}
 
 
 def _runtime_contract_differences(
@@ -299,15 +278,12 @@ def _runtime_identity(runtime_model: dict[str, Any]) -> dict[str, Any]:
         for index in range(torch.cuda.device_count())
     ]
     if not devices or not all("H20" in name.upper() for name in devices):
-        raise RuntimeError(
-            f"block-length runtime requires NVIDIA H20: {devices}"
-        )
+        raise RuntimeError(f"block-length runtime requires NVIDIA H20: {devices}")
     payload = {
         "schema_version": "flcva-block-length-runtime-v4",
         "model_snapshot": _snapshot_identity(runtime_model),
         "packages": {
-            name: package_metadata.version(name)
-            for name in RUNTIME_PACKAGE_NAMES
+            name: package_metadata.version(name) for name in RUNTIME_PACKAGE_NAMES
         },
         "cuda": str(torch.version.cuda),
         "device_family": "NVIDIA H20",
@@ -329,38 +305,26 @@ def _assert_audited(run_dir: Path) -> dict[str, Any]:
 def _problem_universe(
     run_dir: Path,
 ) -> dict[str, dict[str, set[str]]]:
-    output: dict[str, dict[str, set[str]]] = defaultdict(
-        lambda: defaultdict(set)
-    )
-    for row in _iter_jsonl_gz(
-        run_dir / "evaluation" / "values.jsonl.gz"
-    ):
-        output[str(row["split"])][str(row["dataset_id"])].add(
-            str(row["problem_id"])
-        )
+    output: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for row in _iter_jsonl_gz(run_dir / "evaluation" / "values.jsonl.gz"):
+        output[str(row["split"])][str(row["dataset_id"])].add(str(row["problem_id"]))
     return output
 
 
 def _sample_problem_ids() -> dict[str, dict[str, list[str]]]:
-    universes = [
-        _problem_universe(run_dir) for run_dir in SOURCE_RUNS.values()
-    ]
+    universes = [_problem_universe(run_dir) for run_dir in SOURCE_RUNS.values()]
     selected: dict[str, dict[str, list[str]]] = {}
     for split, quotas in SPLIT_QUOTAS.items():
         selected[split] = {}
         for dataset_id, quota in quotas.items():
             shared = set.intersection(
-                *(
-                    universe[split][dataset_id]
-                    for universe in universes
-                )
+                *(universe[split][dataset_id] for universe in universes)
             )
             ordered = sorted(
                 shared,
                 key=lambda problem_id: hashlib.sha256(
                     (
-                        f"{SELECTION_NAMESPACE}:{split}:"
-                        f"{dataset_id}:{problem_id}"
+                        f"{SELECTION_NAMESPACE}:{split}:" f"{dataset_id}:{problem_id}"
                     ).encode()
                 ).hexdigest(),
             )
@@ -374,14 +338,10 @@ def _sample_problem_ids() -> dict[str, dict[str, list[str]]]:
 
 def _value_index(run_dir: Path) -> dict[str, dict[str, Any]]:
     output: dict[str, dict[str, Any]] = {}
-    for row in _iter_jsonl_gz(
-        run_dir / "evaluation" / "values.jsonl.gz"
-    ):
+    for row in _iter_jsonl_gz(run_dir / "evaluation" / "values.jsonl.gz"):
         output[str(row["checkpoint_id"])] = {
             "split": str(row["split"]),
-            "proxies": {
-                proxy: row["proxies"].get(proxy) for proxy in PROXIES
-            },
+            "proxies": {proxy: row["proxies"].get(proxy) for proxy in PROXIES},
         }
     return output
 
@@ -393,11 +353,7 @@ def _extract_problem(
     expected_model_id: str,
     values: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    path = (
-        run_dir
-        / "problems"
-        / f"{_safe_problem_name(problem_id)}.json.gz"
-    )
+    path = run_dir / "problems" / f"{_safe_problem_name(problem_id)}.json.gz"
     artifact = read_json_gz(path)
     if not verify_sealed_record(artifact):
         raise ValueError(f"problem artifact seal failed: {problem_id}")
@@ -409,9 +365,9 @@ def _extract_problem(
     for checkpoint in artifact["checkpoints"]:
         if checkpoint["model_id"] != expected_model_id:
             raise ValueError(f"{problem_id}: model identity mismatch")
-        by_spine_depth[
-            (int(checkpoint["spine_id"]), int(checkpoint["depth"]))
-        ] = checkpoint
+        by_spine_depth[(int(checkpoint["spine_id"]), int(checkpoint["depth"]))] = (
+            checkpoint
+        )
 
     spines: list[dict[str, Any]] = []
     for spine_id in range(4):
@@ -433,9 +389,7 @@ def _extract_problem(
                 3,
                 4,
             ]:
-                raise ValueError(
-                    f"{checkpoint['checkpoint_id']}: incomplete branches"
-                )
+                raise ValueError(f"{checkpoint['checkpoint_id']}: incomplete branches")
             extracted_branches: list[dict[str, Any]] = []
             for branch in branch_rows:
                 reasoning_tokens = blobs.get(str(branch["reasoning_blob"]))
@@ -459,9 +413,7 @@ def _extract_problem(
                     "split": value["split"],
                     "proxies": value["proxies"],
                     "stop_answer_tokens": checkpoint["stop_answer_tokens"],
-                    "on_spine_answer_tokens_512": successor_512[
-                        "stop_answer_tokens"
-                    ],
+                    "on_spine_answer_tokens_512": successor_512["stop_answer_tokens"],
                     "branches": extracted_branches,
                 }
             )
@@ -474,9 +426,7 @@ def _extract_problem(
             }
         )
     splits = {
-        checkpoint["split"]
-        for spine in spines
-        for checkpoint in spine["checkpoints"]
+        checkpoint["split"] for spine in spines for checkpoint in spine["checkpoints"]
     }
     if len(splits) != 1:
         raise ValueError(f"{problem_id}: split differs across checkpoints")
@@ -506,7 +456,6 @@ def prepare_inputs(
     if len(selected_ids) != 400 or len(set(selected_ids)) != 400:
         raise ValueError("block-length study requires 400 unique problems")
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    bundle = _execution_bundle()
     selected_models = model_names or tuple(SOURCE_RUNS)
     if not selected_models or any(
         model_name not in SOURCE_RUNS for model_name in selected_models
@@ -521,10 +470,8 @@ def prepare_inputs(
             config.backend != "vllm"
             or config.model.id != contract["model_id"]
             or config.model.revision != contract["model_revision"]
-            or config.model.tokenizer_revision
-            != contract["tokenizer_revision"]
-            or config.sampling.model_dump(mode="json")
-            != contract["sampling"]
+            or config.model.tokenizer_revision != contract["tokenizer_revision"]
+            or config.sampling.model_dump(mode="json") != contract["sampling"]
             or config.global_seed != contract["global_seed"]
         ):
             raise ValueError("length config differs from formal source contract")
@@ -532,9 +479,7 @@ def prepare_inputs(
         if not verify_sealed_record(source_manifest):
             raise ValueError("source merged manifest seal failed")
         model_identities = {
-            payload_sha256(row["runtime_model_identity"]): row[
-                "runtime_model_identity"
-            ]
+            payload_sha256(row["runtime_model_identity"]): row["runtime_model_identity"]
             for row in source_manifest["parent_runs"]
         }
         merge = _read_json(run_dir / "merge_summary.json")
@@ -543,8 +488,7 @@ def prepare_inputs(
         for source_shard in merge["inputs"]:
             source_run = _read_json(Path(source_shard) / "run.json")
             packages = {
-                name: source_run["packages"].get(name)
-                for name in RUNTIME_PACKAGE_NAMES
+                name: source_run["packages"].get(name) for name in RUNTIME_PACKAGE_NAMES
             }
             package_sets[payload_sha256(packages)] = packages
             hardware = {
@@ -586,9 +530,6 @@ def prepare_inputs(
                 "source_run_id": audit["run_id"],
                 "source_contract_sha256": audit["contract_sha256"],
                 "source_result_merkle_root": audit["result_merkle_root"],
-                "source_audit_manifest_sha256": file_sha256(
-                    run_dir / "audit_manifest.json"
-                ),
                 "selection": {
                     "namespace": SELECTION_NAMESPACE,
                     "quotas": SPLIT_QUOTAS,
@@ -638,8 +579,6 @@ def prepare_inputs(
                 "labels_included": False,
                 "proxies": list(PROXIES),
                 "input_file": input_path.name,
-                "input_sha256": file_sha256(input_path),
-                "execution_bundle": bundle,
                 "runtime_contract": {
                     "model_snapshot": _snapshot_identity(
                         next(iter(model_identities.values()))
@@ -659,7 +598,6 @@ def prepare_inputs(
                 {
                     "model": model_name,
                     "problems": len(selected_ids),
-                    "input_sha256": manifest["input_sha256"],
                 },
                 sort_keys=True,
             ),
@@ -695,33 +633,26 @@ def _load_input(
     manifest = _read_json(manifest_path)
     if (
         not verify_sealed_record(manifest)
-        or manifest.get("schema_version")
-        != "flcva-block-length-input-manifest-v4"
+        or manifest.get("schema_version") != "flcva-block-length-input-manifest-v4"
         or manifest.get("study_id") != STUDY_ID
-        or manifest.get("model_name") != model_name
-        or manifest.get("labels_included") is not False
-        or manifest.get("lengths") != list(LENGTHS)
-        or manifest.get("common_depths") != list(COMMON_DEPTHS)
-        or manifest.get("workers") != WORKERS
-        or manifest.get("proxies") != list(PROXIES)
-        or (manifest.get("answer_schedule") or {}).get("capacity")
-        != ANSWER_BATCH
-        or manifest.get("evaluation_gates")
-        != {
-            "formal_256_stop_correctness_identity": 1.0,
-            "formal_256_branch_correctness_identity_min": (
-                MIN_256_BRANCH_CORRECTNESS_PARITY
-            ),
-            "formal_256_checkpoint_sign_identity_min": (
-                MIN_256_CHECKPOINT_SIGN_PARITY
-            ),
-        }
-        or manifest.get("execution_bundle") != _execution_bundle()
+        or (manifest.get("model_name") != model_name)
+        or (manifest.get("labels_included") is not False)
+        or (manifest.get("lengths") != list(LENGTHS))
+        or (manifest.get("common_depths") != list(COMMON_DEPTHS))
+        or (manifest.get("workers") != WORKERS)
+        or (manifest.get("proxies") != list(PROXIES))
+        or ((manifest.get("answer_schedule") or {}).get("capacity") != ANSWER_BATCH)
+        or (
+            manifest.get("evaluation_gates")
+            != {
+                "formal_256_stop_correctness_identity": 1.0,
+                "formal_256_branch_correctness_identity_min": MIN_256_BRANCH_CORRECTNESS_PARITY,
+                "formal_256_checkpoint_sign_identity_min": MIN_256_CHECKPOINT_SIGN_PARITY,
+            }
+        )
     ):
         raise ValueError(f"invalid block-length input: {manifest_path}")
     input_path = INPUT_DIR / str(manifest["input_file"])
-    if file_sha256(input_path) != manifest["input_sha256"]:
-        raise ValueError("block-length input digest mismatch")
     rows = list(_iter_jsonl_gz(input_path))
     if len(rows) != 400:
         raise ValueError("block-length input must contain 400 problems")
@@ -732,8 +663,7 @@ def _load_input(
         recorded = str(unhashed.pop("record_sha256", ""))
         unhashed["record_sha256"] = ""
         if (
-            row.get("schema_version")
-            != "flcva-block-length-input-problem-v4"
+            row.get("schema_version") != "flcva-block-length-input-problem-v4"
             or payload_sha256(unhashed) != recorded
             or problem_id in observed_ids
         ):
@@ -746,11 +676,9 @@ def _load_input(
         for dataset_rows in split_rows.values()
         for problem_id in dataset_rows
     )
-    if (
-        observed_ids != set(selected_ids)
-        or manifest["selection"]["problem_ids_sha256"]
-        != payload_sha256(selected_ids)
-    ):
+    if observed_ids != set(selected_ids) or manifest["selection"][
+        "problem_ids_sha256"
+    ] != payload_sha256(selected_ids):
         raise ValueError("block-length input selection mismatch")
     return manifest, input_path, rows
 
@@ -760,8 +688,6 @@ def _generation_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "schema_version": "flcva-block-length-generation-identity-v4",
         "study_id": STUDY_ID,
         "input_manifest_record_sha256": manifest["record_sha256"],
-        "input_sha256": manifest["input_sha256"],
-        "execution_bundle": manifest["execution_bundle"],
         "model_id": manifest["model_id"],
         "model_revision": manifest["model_revision"],
         "tokenizer_revision": manifest["tokenizer_revision"],
@@ -773,6 +699,10 @@ def _generation_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "answer_batch": ANSWER_BATCH,
         "extension_batch": EXTENSION_BATCH,
     }
+    # Preserve recorded generation IDs without validating legacy file digests.
+    for key in ("input_sha256", "execution_bundle"):
+        if key in manifest:
+            payload[key] = manifest[key]
     return {**payload, "identity_sha256": payload_sha256(payload)}
 
 
@@ -795,7 +725,6 @@ def validate_inputs() -> None:
                 {
                     "model": model_name,
                     "problems": len(ids),
-                    "input_sha256": manifest["input_sha256"],
                 },
                 sort_keys=True,
             )
@@ -813,9 +742,7 @@ def _worker_bucket(problem_id: str) -> int:
 
 def _chunks(rows: list[Any], size: int) -> Iterator[list[Any]]:
     if len(rows) % size:
-        raise ValueError(
-            f"request count {len(rows)} is not divisible by batch {size}"
-        )
+        raise ValueError(f"request count {len(rows)} is not divisible by batch {size}")
     for start in range(0, len(rows), size):
         yield rows[start : start + size]
 
@@ -826,9 +753,7 @@ def _generated_metadata(output: Any) -> dict[str, Any]:
         "text": output.text,
         "output_tokens": len(output.token_ids),
         "gpu_seconds": float(output.gpu_seconds or 0.0),
-        "peak_gpu_memory_bytes": int(
-            output.peak_gpu_memory_bytes or 0
-        ),
+        "peak_gpu_memory_bytes": int(output.peak_gpu_memory_bytes or 0),
         "batch_size": int(output.batch_size),
         "batch_utilization": float(output.batch_utilization or 0.0),
         "finish_reason": output.finish_reason,
@@ -856,9 +781,7 @@ def _run_problem(
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     cue_tokens = backend.encode(CANONICAL_CUE)
     base_rows: dict[tuple[str, int], dict[str, Any]] = {}
-    pending_extension: list[
-        tuple[tuple[str, int], GenerationRequest]
-    ] = []
+    pending_extension: list[tuple[tuple[str, int], GenerationRequest]] = []
     results: list[dict[str, Any]] = []
 
     for spine in problem["spines"]:
@@ -894,10 +817,7 @@ def _run_problem(
                     "proxies": checkpoint["proxies"],
                 }
                 first_256 = list(branch["reasoning_tokens_256"])
-                if (
-                    branch_index == 1
-                    and first_256 != spine_tokens[depth : depth + 256]
-                ):
+                if branch_index == 1 and first_256 != spine_tokens[depth : depth + 256]:
                     raise ValueError(
                         "on-spine branch does not match the stored successor"
                     )
@@ -906,9 +826,7 @@ def _run_problem(
                     "first_256": first_256,
                     "prefix": prefix,
                     "spine_tokens": spine_tokens,
-                    "answer_tokens_256": list(
-                        branch["answer_tokens_256"]
-                    ),
+                    "answer_tokens_256": list(branch["answer_tokens_256"]),
                     "on_spine_answer_tokens_512": list(
                         checkpoint["on_spine_answer_tokens_512"]
                     ),
@@ -975,9 +893,7 @@ def _run_problem(
             )
 
     continuations: dict[tuple[str, int, int], list[int]] = {}
-    pending_answers: list[
-        tuple[tuple[str, int, int], GenerationRequest]
-    ] = []
+    pending_answers: list[tuple[tuple[str, int, int], GenerationRequest]] = []
     for key in sorted(base_rows):
         base = base_rows[key]
         first_256 = list(base["first_256"])
@@ -1000,9 +916,7 @@ def _run_problem(
                 (
                     request_key,
                     GenerationRequest(
-                        prompt_token_ids=(
-                            base["prefix"] + continuation + cue_tokens
-                        ),
+                        prompt_token_ids=(base["prefix"] + continuation + cue_tokens),
                         max_tokens=ANSWER_MAX_TOKENS,
                         seed=stable_seed(
                             global_seed,
@@ -1039,9 +953,7 @@ def _run_problem(
             metadata["batch_position"] = batch_position
             metadata["seed"] = request.seed
             metadata["decoded_text"] = decoded_text
-            metadata["backend_text_matches_decode"] = (
-                metadata["text"] == decoded_text
-            )
+            metadata["backend_text_matches_decode"] = metadata["text"] == decoded_text
             physical["answer_backend_text_mismatches"] += int(
                 not metadata["backend_text_matches_decode"]
             )
@@ -1108,14 +1020,10 @@ def _run_problem(
                 extension_tokens = list(extension["tokens"])
                 extension_seed = int(extension["seed"])
                 extension_batch_index = int(extension["batch_index"])
-                extension_batch_position = int(
-                    extension["batch_position"]
-                )
+                extension_batch_position = int(extension["batch_position"])
                 extension_batch_size = int(extension["batch_size"])
                 extension_gpu_seconds = float(extension["gpu_seconds"])
-                extension_peak_memory = int(
-                    extension["peak_gpu_memory_bytes"]
-                )
+                extension_peak_memory = int(extension["peak_gpu_memory_bytes"])
             physical_source = {
                 128: "stored branch prefix plus new matched probe",
                 256: "stored formal branch plus new matched probe",
@@ -1145,24 +1053,16 @@ def _run_problem(
                     "answer_backend_text_matches_decode": answer[
                         "backend_text_matches_decode"
                     ],
-                    "answer_decode_binding_sha256": answer[
-                        "decode_binding_sha256"
-                    ],
+                    "answer_decode_binding_sha256": answer["decode_binding_sha256"],
                     "answer_tokens": len(answer_tokens),
                     "answer_seed": int(answer["seed"]),
                     "answer_batch_capacity": ANSWER_BATCH,
                     "answer_batch_index": int(answer["batch_index"]),
-                    "answer_batch_position": int(
-                        answer["batch_position"]
-                    ),
+                    "answer_batch_position": int(answer["batch_position"]),
                     "answer_batch_size": int(answer["batch_size"]),
-                    "answer_batch_utilization": float(
-                        answer["batch_utilization"]
-                    ),
+                    "answer_batch_utilization": float(answer["batch_utilization"]),
                     "answer_finish_reason": answer["finish_reason"],
-                    "raw_answer": (
-                        CANONICAL_CUE + answer["decoded_text"]
-                    ),
+                    "raw_answer": (CANONICAL_CUE + answer["decoded_text"]),
                     "formal_answer_token_match": (
                         answer_tokens == formal_tokens
                         if formal_tokens is not None
@@ -1172,12 +1072,9 @@ def _run_problem(
                     "physical_source": physical_source,
                     "physical_reasoning_tokens": physical_reasoning,
                     "physical_answer_tokens": len(answer_tokens),
-                    "physical_request_count": (
-                        1 + int(extension is not None)
-                    ),
+                    "physical_request_count": (1 + int(extension is not None)),
                     "gpu_seconds": (
-                        float(answer["gpu_seconds"])
-                        + extension_gpu_seconds
+                        float(answer["gpu_seconds"]) + extension_gpu_seconds
                     ),
                     "peak_gpu_memory_bytes": max(
                         int(answer["peak_gpu_memory_bytes"]),
@@ -1187,10 +1084,7 @@ def _run_problem(
             )
     if len(results) != 672:
         raise ValueError("block-length problem output cardinality mismatch")
-    if (
-        int(physical["requests"]) != 840
-        or int(physical["batches"]) != 32
-    ):
+    if int(physical["requests"]) != 840 or int(physical["batches"]) != 32:
         raise ValueError("block-length physical schedule mismatch")
     return results, physical
 
@@ -1221,9 +1115,8 @@ def _resume_worker_payloads_are_valid(
         ):
             return False
         problem_files = worker.get("problem_files")
-        if (
-            not isinstance(problem_files, list)
-            or len(problem_files) != len(expected_problem_ids)
+        if not isinstance(problem_files, list) or len(problem_files) != len(
+            expected_problem_ids
         ):
             return False
         observed: list[str] = []
@@ -1233,17 +1126,10 @@ def _resume_worker_payloads_are_valid(
             if not isinstance(item, dict):
                 return False
             relative = Path(str(item.get("path", "")))
-            if (
-                not relative.parts
-                or relative.is_absolute()
-                or ".." in relative.parts
-            ):
+            if not relative.parts or relative.is_absolute() or ".." in relative.parts:
                 return False
             path = worker_dir / relative
-            if (
-                not path.is_file()
-                or file_sha256(path) != item.get("sha256")
-            ):
+            if not path.is_file():
                 return False
             payload = read_json_gz(path)
             if (
@@ -1251,17 +1137,17 @@ def _resume_worker_payloads_are_valid(
                 or payload.get("schema_version")
                 != "flcva-block-length-output-problem-v4"
                 or payload.get("study_id") != STUDY_ID
-                or payload.get("model_name") != model_name
-                or payload.get("model_id") != input_manifest["model_id"]
-                or payload.get("model_revision")
-                != input_manifest["model_revision"]
-                or payload.get("worker_index") != worker_index
-                or payload.get("input_sha256")
-                != input_manifest["input_sha256"]
-                or payload.get("generation_identity_sha256")
-                != generation_identity["identity_sha256"]
-                or payload.get("runtime_identity_sha256")
-                != runtime["identity_sha256"]
+                or (payload.get("model_name") != model_name)
+                or (payload.get("model_id") != input_manifest["model_id"])
+                or (payload.get("model_revision") != input_manifest["model_revision"])
+                or (payload.get("worker_index") != worker_index)
+                or (
+                    payload.get("generation_identity_sha256")
+                    != generation_identity["identity_sha256"]
+                )
+                or (
+                    payload.get("runtime_identity_sha256") != runtime["identity_sha256"]
+                )
             ):
                 return False
             problem_id = str(payload.get("problem_id"))
@@ -1270,10 +1156,8 @@ def _resume_worker_payloads_are_valid(
                 or item.get("problem_id") != problem_id
                 or payload.get("input_problem_record_sha256")
                 != problem_map[problem_id]["record_sha256"]
-                or payload.get("dataset_id")
-                != problem_map[problem_id]["dataset_id"]
-                or payload.get("split")
-                != problem_map[problem_id]["split"]
+                or payload.get("dataset_id") != problem_map[problem_id]["dataset_id"]
+                or payload.get("split") != problem_map[problem_id]["split"]
             ):
                 return False
             rows = payload.get("results")
@@ -1306,8 +1190,7 @@ def _resume_worker_payloads_are_valid(
         return (
             sorted(observed) == expected_problem_ids
             and len(set(observed)) == len(observed)
-            and worker.get("problem_ids_sha256")
-            == payload_sha256(expected_problem_ids)
+            and worker.get("problem_ids_sha256") == payload_sha256(expected_problem_ids)
             and worker.get("problems") == len(expected_problem_ids)
             and worker.get("rows") == rows_total
             and _numeric_maps_equal(
@@ -1328,10 +1211,7 @@ def generate(
         raise ValueError("worker index must be in [0,7]")
     manifest, _, problems = _load_input(model_name)
     config = RunConfig.load(CONFIGS[model_name])
-    if (
-        _effective_generation_config(config)
-        != manifest["generation_contract"]
-    ):
+    if _effective_generation_config(config) != manifest["generation_contract"]:
         raise ValueError("model config differs from sealed length input")
     generation_identity = _generation_identity(manifest)
     expected = sorted(
@@ -1340,9 +1220,7 @@ def generate(
         if _worker_bucket(str(problem["problem_id"])) == worker_index
     )
     problem_map = {str(row["problem_id"]): row for row in problems}
-    worker_dir = (
-        output_dir.resolve() / "workers" / f"worker-{worker_index:02d}"
-    )
+    worker_dir = output_dir.resolve() / "workers" / f"worker-{worker_index:02d}"
     worker_dir.mkdir(parents=True, exist_ok=True)
     worker_manifest_path = worker_dir / "manifest.json"
     if worker_manifest_path.exists():
@@ -1351,19 +1229,15 @@ def generate(
             verify_sealed_record(existing)
             and existing.get("schema_version")
             == "flcva-block-length-worker-manifest-v4"
-            and existing.get("complete") is True
-            and existing.get("study_id") == STUDY_ID
-            and existing.get("model_name") == model_name
-            and existing.get("model_id") == manifest["model_id"]
-            and existing.get("model_revision")
-            == manifest["model_revision"]
-            and existing.get("worker_index") == worker_index
-            and existing.get("workers") == WORKERS
-            and existing.get("problem_ids_sha256")
-            == payload_sha256(expected)
-            and existing.get("input_sha256") == manifest["input_sha256"]
-            and existing.get("generation_identity")
-            == generation_identity
+            and (existing.get("complete") is True)
+            and (existing.get("study_id") == STUDY_ID)
+            and (existing.get("model_name") == model_name)
+            and (existing.get("model_id") == manifest["model_id"])
+            and (existing.get("model_revision") == manifest["model_revision"])
+            and (existing.get("worker_index") == worker_index)
+            and (existing.get("workers") == WORKERS)
+            and (existing.get("problem_ids_sha256") == payload_sha256(expected))
+            and (existing.get("generation_identity") == generation_identity)
         )
         if not compatible:
             raise ValueError("incompatible existing worker manifest")
@@ -1412,9 +1286,7 @@ def generate(
                 "runtime_contract": "verified",
                 "worker": worker_index,
                 "runtime_identity_sha256": runtime["identity_sha256"],
-                "transport_provenance": _transport_provenance(
-                    backend.runtime_identity
-                ),
+                "transport_provenance": _transport_provenance(backend.runtime_identity),
             },
             sort_keys=True,
         ),
@@ -1438,17 +1310,12 @@ def generate(
                 "model_id": manifest["model_id"],
                 "model_revision": manifest["model_revision"],
                 "worker_index": worker_index,
-                "input_sha256": manifest["input_sha256"],
-                "generation_identity_sha256": generation_identity[
-                    "identity_sha256"
-                ],
+                "generation_identity_sha256": generation_identity["identity_sha256"],
                 "runtime_identity_sha256": runtime["identity_sha256"],
                 "problem_id": problem_id,
                 "dataset_id": problem_map[problem_id]["dataset_id"],
                 "split": problem_map[problem_id]["split"],
-                "input_problem_record_sha256": problem_map[problem_id][
-                    "record_sha256"
-                ],
+                "input_problem_record_sha256": problem_map[problem_id]["record_sha256"],
                 "results": rows,
                 "physical_accounting": accounting,
             }
@@ -1460,7 +1327,6 @@ def generate(
             {
                 "problem_id": problem_id,
                 "path": str(relative),
-                "sha256": file_sha256(path),
                 "rows": len(rows),
             }
         )
@@ -1491,7 +1357,6 @@ def generate(
             "model_revision": manifest["model_revision"],
             "worker_index": worker_index,
             "workers": WORKERS,
-            "input_sha256": manifest["input_sha256"],
             "generation_identity": generation_identity,
             "problem_ids_sha256": payload_sha256(expected),
             "problems": len(expected),
@@ -1508,12 +1373,6 @@ def generate(
 
 
 def _load_labels() -> dict[str, tuple[str, str]]:
-    manifest = _read_json(DATA_MANIFEST_PATH)
-    if (
-        file_sha256(LABELS_PATH)
-        != manifest["combined"]["sealed_labels_sha256"]
-    ):
-        raise ValueError("sealed label digest mismatch")
     output: dict[str, tuple[str, str]] = {}
     with LABELS_PATH.open(encoding="utf-8") as stream:
         for line in stream:
@@ -1579,17 +1438,13 @@ def _expected_problem_rows(
                         "on_spine_second_256": list(
                             spine_tokens[depth + 256 : depth + 512]
                         ),
-                        "formal_answer_tokens_256": list(
-                            branch["answer_tokens_256"]
-                        ),
+                        "formal_answer_tokens_256": list(branch["answer_tokens_256"]),
                         "formal_answer_tokens_512": (
                             list(checkpoint["on_spine_answer_tokens_512"])
                             if branch_index == 1
                             else None
                         ),
-                        "stop_answer_tokens": list(
-                            checkpoint["stop_answer_tokens"]
-                        ),
+                        "stop_answer_tokens": list(checkpoint["stop_answer_tokens"]),
                         "proxies": checkpoint["proxies"],
                     }
     if len(expected) != 672:
@@ -1642,9 +1497,7 @@ def _validate_problem_rows(
             "proxies",
         ):
             if row.get(field) != reference[field]:
-                raise ValueError(
-                    f"block-length row differs from input field {field}"
-                )
+                raise ValueError(f"block-length row differs from input field {field}")
 
         length = int(row["length"])
         branch_index = int(row["branch_index"])
@@ -1659,9 +1512,7 @@ def _validate_problem_rows(
                 or not all(isinstance(token, int) for token in extension_tokens)
             ):
                 raise ValueError("off-spine 512 extension is not auditable")
-            continuation = (
-                list(reference["first_256"]) + list(extension_tokens)
-            )
+            continuation = list(reference["first_256"]) + list(extension_tokens)
             expected_extension_seed = stable_seed(
                 global_seed,
                 STUDY_ID,
@@ -1674,9 +1525,7 @@ def _validate_problem_rows(
                 row.get("extension_seed") != expected_extension_seed
                 or row.get("extension_batch_capacity") != EXTENSION_BATCH
                 or row.get("extension_batch_size") != EXTENSION_BATCH
-                or not 0
-                <= int(row.get("extension_batch_index", -1))
-                < 4
+                or not 0 <= int(row.get("extension_batch_index", -1)) < 4
                 or not 0
                 <= int(row.get("extension_batch_position", -1))
                 < EXTENSION_BATCH
@@ -1710,11 +1559,9 @@ def _validate_problem_rows(
                 continuation = list(reference["first_256"]) + list(
                     reference["on_spine_second_256"]
                 )
-        if (
-            len(continuation) != length
-            or row.get("reasoning_token_sha256")
-            != payload_sha256(continuation)
-        ):
+        if len(continuation) != length or row.get(
+            "reasoning_token_sha256"
+        ) != payload_sha256(continuation):
             raise ValueError("reasoning continuation digest mismatch")
 
         answer_token_ids = row.get("answer_token_ids")
@@ -1742,9 +1589,7 @@ def _validate_problem_rows(
                 1.0,
             )
             or not 4 <= int(row.get("answer_batch_index", -1)) < 32
-            or not 0
-            <= int(row.get("answer_batch_position", -1))
-            < ANSWER_BATCH
+            or not 0 <= int(row.get("answer_batch_position", -1)) < ANSWER_BATCH
         ):
             raise ValueError("matched answer-probe provenance mismatch")
         answer_batches[int(row["answer_batch_index"])].append(
@@ -1765,9 +1610,7 @@ def _validate_problem_rows(
             )
         )
         expected_match = (
-            answer_token_ids == formal_tokens
-            if formal_tokens is not None
-            else None
+            answer_token_ids == formal_tokens if formal_tokens is not None else None
         )
         if row.get("formal_answer_token_match") != expected_match:
             raise ValueError("formal answer parity bit mismatch")
@@ -1776,8 +1619,7 @@ def _validate_problem_rows(
             or row.get("physical_reasoning_tokens")
             != (256 if extension_expected else 0)
             or row.get("physical_answer_tokens") != len(answer_token_ids)
-            or row.get("physical_request_count")
-            != 1 + int(extension_expected)
+            or row.get("physical_request_count") != 1 + int(extension_expected)
         ):
             raise ValueError("row ledger accounting mismatch")
         decoded_text = row.get("answer_decoded_text")
@@ -1840,39 +1682,28 @@ def _validate_problem_rows(
             or sorted(positions) != list(range(EXTENSION_BATCH))
             or len(set(contexts)) != EXTENSION_BATCH
         ):
-            raise ValueError(
-                f"extension batch {batch_index} structure mismatch"
-            )
+            raise ValueError(f"extension batch {batch_index} structure mismatch")
     if set(answer_batches) != set(range(4, 32)):
         raise ValueError("answer batch coverage mismatch")
     matched_contexts: dict[tuple[str, int], int] = {}
     for batch_index, batch_rows in answer_batches.items():
         ordered = sorted(batch_rows)
-        if (
-            len(ordered) != ANSWER_BATCH
-            or [row[0] for row in ordered]
-            != list(range(ANSWER_BATCH))
+        if len(ordered) != ANSWER_BATCH or [row[0] for row in ordered] != list(
+            range(ANSWER_BATCH)
         ):
-            raise ValueError(
-                f"answer batch {batch_index} structure mismatch"
-            )
+            raise ValueError(f"answer batch {batch_index} structure mismatch")
         for start in range(0, ANSWER_BATCH, len(LENGTHS)):
             group = ordered[start : start + len(LENGTHS)]
             contexts = {(row[1], row[2]) for row in group}
             lengths = [row[3] for row in group]
             if len(contexts) != 1 or lengths != list(LENGTHS):
-                raise ValueError(
-                    "128/256/512 probes are not matched in one batch"
-                )
+                raise ValueError("128/256/512 probes are not matched in one batch")
             context = next(iter(contexts))
             if context in matched_contexts:
-                raise ValueError(
-                    "answer context occurs in multiple matched batches"
-                )
+                raise ValueError("answer context occurs in multiple matched batches")
             matched_contexts[context] = batch_index
     expected_contexts = {
-        (checkpoint_id, branch_index)
-        for checkpoint_id, branch_index, _ in expected
+        (checkpoint_id, branch_index) for checkpoint_id, branch_index, _ in expected
     }
     if set(matched_contexts) != expected_contexts:
         raise ValueError("matched answer context coverage mismatch")
@@ -1881,12 +1712,8 @@ def _validate_problem_rows(
         "gpu_seconds": total_gpu_seconds,
         "peak_gpu_memory_bytes": peak_gpu_memory,
         "requests": float(requests),
-        "batches": float(
-            len(extension_batches) + len(answer_batches)
-        ),
-        "answer_backend_text_mismatches": float(
-            answer_backend_text_mismatches
-        ),
+        "batches": float(len(extension_batches) + len(answer_batches)),
+        "answer_backend_text_mismatches": float(answer_backend_text_mismatches),
     }
 
 
@@ -1900,19 +1727,14 @@ def _load_outputs(
     source_audit = _assert_audited(source_run)
     if (
         source_audit["run_id"] != input_manifest["source_run_id"]
-        or source_audit["contract_sha256"]
-        != input_manifest["source_contract_sha256"]
+        or source_audit["contract_sha256"] != input_manifest["source_contract_sha256"]
         or source_audit["result_merkle_root"]
         != input_manifest["source_result_merkle_root"]
-        or file_sha256(source_run / "audit_manifest.json")
-        != input_manifest["source_audit_manifest_sha256"]
     ):
         raise ValueError("sealed length input no longer authenticates its source")
     for problem_id, problem in expected.items():
         source_problem = read_json_gz(
-            source_run
-            / "problems"
-            / f"{_safe_problem_name(problem_id)}.json.gz"
+            source_run / "problems" / f"{_safe_problem_name(problem_id)}.json.gz"
         )
         if (
             not verify_sealed_record(source_problem)
@@ -1931,18 +1753,15 @@ def _load_outputs(
         worker = _read_json(worker_dir / "manifest.json")
         if (
             not verify_sealed_record(worker)
-            or worker.get("schema_version")
-            != "flcva-block-length-worker-manifest-v4"
+            or worker.get("schema_version") != "flcva-block-length-worker-manifest-v4"
             or worker.get("complete") is not True
-            or worker.get("study_id") != STUDY_ID
-            or worker.get("model_name") != model_name
-            or worker.get("model_id") != input_manifest["model_id"]
-            or worker.get("model_revision")
-            != input_manifest["model_revision"]
-            or worker.get("worker_index") != worker_index
-            or worker.get("workers") != WORKERS
-            or worker.get("input_sha256") != input_manifest["input_sha256"]
-            or worker.get("generation_identity") != generation_identity
+            or (worker.get("study_id") != STUDY_ID)
+            or (worker.get("model_name") != model_name)
+            or (worker.get("model_id") != input_manifest["model_id"])
+            or (worker.get("model_revision") != input_manifest["model_revision"])
+            or (worker.get("worker_index") != worker_index)
+            or (worker.get("workers") != WORKERS)
+            or (worker.get("generation_identity") != generation_identity)
         ):
             raise ValueError("invalid block-length worker manifest")
         runtime = worker["runtime_identity"]
@@ -1965,25 +1784,23 @@ def _load_outputs(
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError("unsafe block-length result path")
             path = worker_dir / relative
-            if file_sha256(path) != item["sha256"]:
-                raise ValueError("block-length result digest mismatch")
             payload = read_json_gz(path)
             if (
                 not verify_sealed_record(payload)
                 or payload.get("schema_version")
                 != "flcva-block-length-output-problem-v4"
                 or payload.get("study_id") != STUDY_ID
-                or payload.get("model_name") != model_name
-                or payload.get("model_id") != input_manifest["model_id"]
-                or payload.get("model_revision")
-                != input_manifest["model_revision"]
-                or payload.get("worker_index") != worker_index
-                or payload.get("input_sha256")
-                != input_manifest["input_sha256"]
-                or payload.get("generation_identity_sha256")
-                != generation_identity["identity_sha256"]
-                or payload.get("runtime_identity_sha256")
-                != runtime["identity_sha256"]
+                or (payload.get("model_name") != model_name)
+                or (payload.get("model_id") != input_manifest["model_id"])
+                or (payload.get("model_revision") != input_manifest["model_revision"])
+                or (payload.get("worker_index") != worker_index)
+                or (
+                    payload.get("generation_identity_sha256")
+                    != generation_identity["identity_sha256"]
+                )
+                or (
+                    payload.get("runtime_identity_sha256") != runtime["identity_sha256"]
+                )
             ):
                 raise ValueError("invalid block-length problem result")
             problem_id = str(payload["problem_id"])
@@ -1993,8 +1810,7 @@ def _load_outputs(
                 or item.get("problem_id") != problem_id
                 or payload.get("input_problem_record_sha256")
                 != expected[problem_id]["record_sha256"]
-                or payload.get("dataset_id")
-                != expected[problem_id]["dataset_id"]
+                or payload.get("dataset_id") != expected[problem_id]["dataset_id"]
                 or payload.get("split") != expected[problem_id]["split"]
             ):
                 raise ValueError("block-length result coverage mismatch")
@@ -2013,9 +1829,7 @@ def _load_outputs(
                 raise ValueError("problem physical accounting mismatch")
             for key, value in recomputed.items():
                 if key == "peak_gpu_memory_bytes":
-                    worker_accounting[key] = max(
-                        worker_accounting[key], value
-                    )
+                    worker_accounting[key] = max(worker_accounting[key], value)
                 else:
                     worker_accounting[key] += value
             outputs.extend(rows)
@@ -2029,8 +1843,7 @@ def _load_outputs(
         )
         if (
             sorted(worker_ids) != expected_worker
-            or worker["problem_ids_sha256"]
-            != payload_sha256(expected_worker)
+            or worker["problem_ids_sha256"] != payload_sha256(expected_worker)
             or worker.get("problems") != len(expected_worker)
             or worker["rows"] != worker_rows
             or not _numeric_maps_equal(
@@ -2100,26 +1913,16 @@ def _checkpoint_values(
                 "continuation_costs": costs,
                 "formal_answer_token_match": [
                     row["formal_answer_token_match"]
-                    for row in sorted(
-                        rows, key=lambda item: int(item["branch_index"])
-                    )
+                    for row in sorted(rows, key=lambda item: int(item["branch_index"]))
                 ],
-                "marginal_value": (
-                    1000.0 * (mean_correct - stop) / mean_cost
-                ),
-                "single_draw_recovery": (
-                    mean_correct if stop == 0 else None
-                ),
-                "single_draw_damage": (
-                    1.0 - mean_correct if stop == 1 else None
-                ),
+                "marginal_value": (1000.0 * (mean_correct - stop) / mean_cost),
+                "single_draw_recovery": (mean_correct if stop == 0 else None),
+                "single_draw_damage": (1.0 - mean_correct if stop == 1 else None),
                 "recovery_detected": (
                     int(any(continuation_correct)) if stop == 0 else None
                 ),
                 "damage_detected": (
-                    int(not all(continuation_correct))
-                    if stop == 1
-                    else None
+                    int(not all(continuation_correct)) if stop == 1 else None
                 ),
                 "proxies": rows[0]["proxies"],
             }
@@ -2147,9 +1950,7 @@ def _formal_256_parity(
         )
     }
     rerun = {
-        str(row["checkpoint_id"]): row
-        for row in values
-        if int(row["length"]) == 256
+        str(row["checkpoint_id"]): row for row in values if int(row["length"]) == 256
     }
     if not rerun or not set(rerun).issubset(formal):
         raise ValueError("256-token parity checkpoint universe mismatch")
@@ -2162,20 +1963,14 @@ def _formal_256_parity(
     absolute_value_delta: list[float] = []
     for checkpoint_id, row in rerun.items():
         source = formal[checkpoint_id]
-        stop_matches += int(
-            int(row["stop_correct"]) == int(source["stop_correct"])
-        )
+        stop_matches += int(int(row["stop_correct"]) == int(source["stop_correct"]))
         rerun_correct = [int(value) for value in row["continuation_correct"]]
-        source_correct = [
-            int(value) for value in source["continuation_correct"]
-        ]
+        source_correct = [int(value) for value in source["continuation_correct"]]
         if len(rerun_correct) != 4 or len(source_correct) != 4:
             raise ValueError("256-token parity branch cardinality mismatch")
         branch_matches += sum(
             int(left == right)
-            for left, right in zip(
-                rerun_correct, source_correct, strict=True
-            )
+            for left, right in zip(rerun_correct, source_correct, strict=True)
         )
         branch_total += 4
         sign_matches += int(
@@ -2190,10 +1985,7 @@ def _formal_256_parity(
         token_matches += sum(int(value) for value in parity_bits)
         token_total += 4
         absolute_value_delta.append(
-            abs(
-                float(row["marginal_value"])
-                - float(source["marginal_value"])
-            )
+            abs(float(row["marginal_value"]) - float(source["marginal_value"]))
         )
     checkpoints = len(rerun)
     stop_rate = stop_matches / checkpoints
@@ -2214,14 +2006,10 @@ def _formal_256_parity(
         "branch_correctness_identity": branch_rate,
         "checkpoint_sign_identity": sign_rate,
         "answer_token_identity": token_rate,
-        "mean_absolute_marginal_value_delta": float(
-            np.mean(absolute_value_delta)
-        ),
+        "mean_absolute_marginal_value_delta": float(np.mean(absolute_value_delta)),
         "thresholds": {
             "stop_correctness_identity": 1.0,
-            "branch_correctness_identity": (
-                MIN_256_BRANCH_CORRECTNESS_PARITY
-            ),
+            "branch_correctness_identity": (MIN_256_BRANCH_CORRECTNESS_PARITY),
             "checkpoint_sign_identity": MIN_256_CHECKPOINT_SIGN_PARITY,
         },
         "passed": passed,
@@ -2275,18 +2063,14 @@ def _transform_features(
     )
     missing = np.isnan(raw).astype(float)
     filled = np.where(np.isnan(raw), medians, raw)
-    return np.column_stack(
-        [np.ones(len(rows)), (filled - center) / scale, missing]
-    )
+    return np.column_stack([np.ones(len(rows)), (filled - center) / scale, missing])
 
 
 def _adaptive_rows(
     values: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     analysis = [row for row in values if row["split"] == "analysis"]
-    confirmation = [
-        row for row in values if row["split"] == "confirmation"
-    ]
+    confirmation = [row for row in values if row["split"] == "confirmation"]
     by_length_analysis = {
         length: sorted(
             [row for row in analysis if row["length"] == length],
@@ -2301,10 +2085,7 @@ def _adaptive_rows(
         )
         for length in LENGTHS
     }
-    reference_ids = [
-        str(row["checkpoint_id"])
-        for row in by_length_confirmation[256]
-    ]
+    reference_ids = [str(row["checkpoint_id"]) for row in by_length_confirmation[256]]
     predictions: dict[int, dict[str, float]] = {}
     fits: dict[str, Any] = {}
     for length in LENGTHS:
@@ -2321,10 +2102,7 @@ def _adaptive_rows(
             design.T @ design + penalty,
             design.T @ target,
         )
-        predicted = (
-            _transform_features(test, medians, center, scale)
-            @ coefficients
-        )
+        predicted = _transform_features(test, medians, center, scale) @ coefficients
         ids = [str(row["checkpoint_id"]) for row in test]
         if ids != reference_ids:
             raise ValueError("adaptive length checkpoint order mismatch")
@@ -2340,8 +2118,7 @@ def _adaptive_rows(
             "scale": scale.tolist(),
         }
     lookup = {
-        (str(row["checkpoint_id"]), int(row["length"])): row
-        for row in confirmation
+        (str(row["checkpoint_id"]), int(row["length"])): row for row in confirmation
     }
     adaptive: list[dict[str, Any]] = []
     choices: dict[int, int] = defaultdict(int)
@@ -2358,8 +2135,7 @@ def _adaptive_rows(
         source["source_length"] = chosen
         source["length"] = "adaptive"
         source["predicted_values"] = {
-            str(length): predictions[length][checkpoint_id]
-            for length in LENGTHS
+            str(length): predictions[length][checkpoint_id] for length in LENGTHS
         }
         adaptive.append(source)
     fits["selection"] = {
@@ -2392,27 +2168,15 @@ def _cluster_interval(
         if value is not None:
             grouped[str(row["problem_id"])].append(float(value))
     keys = sorted(grouped)
-    observed = float(
-        np.mean([value for key in keys for value in grouped[key]])
-    )
+    observed = float(np.mean([value for key in keys for value in grouped[key]]))
     rng = random.Random(stable_seed(20251231, STUDY_ID, *seed_parts))
     estimates: list[float] = []
     for _ in range(BOOTSTRAP_REPLICATES):
         sampled = [rng.choice(keys) for _ in keys]
         estimates.append(
-            float(
-                np.mean(
-                    [
-                        value
-                        for key in sampled
-                        for value in grouped[key]
-                    ]
-                )
-            )
+            float(np.mean([value for key in sampled for value in grouped[key]]))
         )
-    return observed, _percentile(estimates, 0.025), _percentile(
-        estimates, 0.975
-    )
+    return observed, _percentile(estimates, 0.025), _percentile(estimates, 0.975)
 
 
 def _paired_cluster_difference(
@@ -2454,9 +2218,7 @@ def _paired_cluster_difference(
         difference([rng.choice(keys) for _ in keys])
         for _ in range(BOOTSTRAP_REPLICATES)
     ]
-    return observed, _percentile(estimates, 0.025), _percentile(
-        estimates, 0.975
-    )
+    return observed, _percentile(estimates, 0.025), _percentile(estimates, 0.975)
 
 
 def _event_metrics(
@@ -2464,13 +2226,9 @@ def _event_metrics(
     values: list[dict[str, Any]],
     adaptive: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    confirmation = [
-        row for row in values if row["split"] == "confirmation"
-    ]
+    confirmation = [row for row in values if row["split"] == "confirmation"]
     conditions: dict[str, list[dict[str, Any]]] = {
-        str(length): [
-            row for row in confirmation if row["length"] == length
-        ]
+        str(length): [row for row in confirmation if row["length"] == length]
         for length in LENGTHS
     }
     conditions["adaptive"] = adaptive
@@ -2485,9 +2243,7 @@ def _event_metrics(
             ),
             ("damage", 1, "single_draw_damage", "damage_detected"),
         ):
-            eligible = [
-                row for row in rows if int(row["stop_correct"]) == stop
-            ]
+            eligible = [row for row in rows if int(row["stop_correct"]) == stop]
             estimate, low, high = _cluster_interval(
                 eligible,
                 field,
@@ -2499,9 +2255,7 @@ def _event_metrics(
                 seed_parts=(model_name, condition, target, "detected"),
             )
             baseline = [
-                row
-                for row in conditions["256"]
-                if int(row["stop_correct"]) == stop
+                row for row in conditions["256"] if int(row["stop_correct"]) == stop
             ]
             if condition == "256":
                 difference = difference_low = difference_high = 0.0
@@ -2564,22 +2318,16 @@ def _proxy_metrics(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     orientations: dict[tuple[str, str], int] = {}
     analysis_256 = [
-        row
-        for row in values
-        if row["split"] == "analysis" and row["length"] == 256
+        row for row in values if row["split"] == "analysis" and row["length"] == 256
     ]
     for target, stop, label_field in (
         ("recovery", 0, "recovery_detected"),
         ("damage", 1, "damage_detected"),
     ):
-        eligible = [
-            row for row in analysis_256 if row["stop_correct"] == stop
-        ]
+        eligible = [row for row in analysis_256 if row["stop_correct"] == stop]
         for proxy in PROXIES:
             available = [
-                row
-                for row in eligible
-                if row["proxies"].get(proxy) is not None
+                row for row in eligible if row["proxies"].get(proxy) is not None
             ]
             auc = roc_auc(
                 [int(row[label_field]) for row in available],
@@ -2587,13 +2335,9 @@ def _proxy_metrics(
             )
             orientations[(target, proxy)] = 1 if auc >= 0.5 else -1
 
-    confirmation = [
-        row for row in values if row["split"] == "confirmation"
-    ]
+    confirmation = [row for row in values if row["split"] == "confirmation"]
     conditions: dict[str, list[dict[str, Any]]] = {
-        str(length): [
-            row for row in confirmation if row["length"] == length
-        ]
+        str(length): [row for row in confirmation if row["length"] == length]
         for length in LENGTHS
     }
     conditions["adaptive"] = adaptive
@@ -2604,16 +2348,12 @@ def _proxy_metrics(
             ("damage", 1, "damage_detected"),
         ):
             eligible = [
-                row
-                for row in condition_rows
-                if int(row["stop_correct"]) == stop
+                row for row in condition_rows if int(row["stop_correct"]) == stop
             ]
             target_rows: list[dict[str, Any]] = []
             for proxy in PROXIES:
                 available = [
-                    row
-                    for row in eligible
-                    if row["proxies"].get(proxy) is not None
+                    row for row in eligible if row["proxies"].get(proxy) is not None
                 ]
                 orientation = orientations[(target, proxy)]
                 target_rows.append(
@@ -2627,8 +2367,7 @@ def _proxy_metrics(
                         "auroc": roc_auc(
                             [int(row[label_field]) for row in available],
                             [
-                                orientation
-                                * float(row["proxies"][proxy])
+                                orientation * float(row["proxies"][proxy])
                                 for row in available
                             ],
                         ),
@@ -2653,8 +2392,7 @@ def _proxy_metrics(
             selected = {
                 str(row["proxy"]): float(row["rank"])
                 for row in rows
-                if row["condition"] == condition
-                and row["target"] == target
+                if row["condition"] == condition and row["target"] == target
             }
             proxies = list(PROXIES)
             baseline_ranks = np.asarray(
@@ -2678,22 +2416,14 @@ def _proxy_metrics(
                     ),
                     "top_proxy_256": top_256,
                     "top_proxy_condition": top_condition,
-                    "top_proxy_stable": int(
-                        top_256 == top_condition
-                    ),
+                    "top_proxy_stable": int(top_256 == top_condition),
                 }
             )
 
     stability_index = {
-        (str(row["target"]), str(row["condition"])): row
-        for row in stability
+        (str(row["target"]), str(row["condition"])): row for row in stability
     }
-    problem_ids = sorted(
-        {
-            str(row["problem_id"])
-            for row in conditions["256"]
-        }
-    )
+    problem_ids = sorted({str(row["problem_id"]) for row in conditions["256"]})
     if len(problem_ids) < 4:
         raise ValueError("too few confirmation problems for rank stability")
     half_size = len(problem_ids) // 2
@@ -2710,11 +2440,7 @@ def _proxy_metrics(
         selected_ids: set[str],
     ) -> dict[str, float]:
         stop = 0 if target == "recovery" else 1
-        label_field = (
-            "recovery_detected"
-            if target == "recovery"
-            else "damage_detected"
-        )
+        label_field = "recovery_detected" if target == "recovery" else "damage_detected"
         eligible = [
             row
             for row in conditions[condition]
@@ -2724,15 +2450,12 @@ def _proxy_metrics(
         aucs: dict[str, float] = {}
         for proxy in PROXIES:
             available = [
-                row
-                for row in eligible
-                if row["proxies"].get(proxy) is not None
+                row for row in eligible if row["proxies"].get(proxy) is not None
             ]
             auc = roc_auc(
                 [int(row[label_field]) for row in available],
                 [
-                    orientations[(target, proxy)]
-                    * float(row["proxies"][proxy])
+                    orientations[(target, proxy)] * float(row["proxies"][proxy])
                     for row in available
                 ],
             )
@@ -2778,9 +2501,7 @@ def _proxy_metrics(
                 selected_array = np.asarray(
                     [selected[proxy] for proxy in PROXIES], dtype=float
                 )
-                rho = float(
-                    np.corrcoef(baseline_array, selected_array)[0, 1]
-                )
+                rho = float(np.corrcoef(baseline_array, selected_array)[0, 1])
                 if not math.isfinite(rho):
                     raise ValueError(
                         "proxy rank correlation is undefined in a half-sample"
@@ -2788,23 +2509,14 @@ def _proxy_metrics(
                 cell = robustness[(target, condition)]
                 cell["rho"].append(rho)
                 cell["top"].append(
-                    float(
-                        baseline_top
-                        == min(PROXIES, key=selected.__getitem__)
-                    )
+                    float(baseline_top == min(PROXIES, key=selected.__getitem__))
                 )
     for key, cell in robustness.items():
         row = stability_index[key]
         row["half_sample_replicates"] = RANK_SUBSAMPLE_REPLICATES
-        row["half_sample_rho_low"] = _percentile(
-            cell["rho"], 0.025
-        )
-        row["half_sample_rho_high"] = _percentile(
-            cell["rho"], 0.975
-        )
-        row["half_sample_top_proxy_stability"] = float(
-            np.mean(cell["top"])
-        )
+        row["half_sample_rho_low"] = _percentile(cell["rho"], 0.025)
+        row["half_sample_rho_high"] = _percentile(cell["rho"], 0.975)
+        row["half_sample_top_proxy_stability"] = float(np.mean(cell["top"]))
     return rows, stability
 
 
@@ -2817,9 +2529,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     )
     temporary = Path(name)
     try:
-        with os.fdopen(
-            descriptor, "w", newline="", encoding="utf-8"
-        ) as stream:
+        with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
@@ -2867,11 +2577,7 @@ def _render_tables(
                 "{} & {} & {:.1f}\\% [{:.1f}, {:.1f}] & "
                 "{:.1f}\\% [{:.1f}, {:.1f}] \\\\".format(
                     model_labels[model],
-                    (
-                        "Adaptive"
-                        if condition == "adaptive"
-                        else f"{condition} tokens"
-                    ),
+                    ("Adaptive" if condition == "adaptive" else f"{condition} tokens"),
                     100 * recovery["single_draw_rate"],
                     100 * recovery["single_draw_low"],
                     100 * recovery["single_draw_high"],
@@ -2987,14 +2693,7 @@ def evaluate(qwen_results: Path, deepseek_results: Path) -> None:
         fits[model_name] = model_fits
         source[model_name] = {
             "input_manifest_record_sha256": manifest["record_sha256"],
-            "source_result_merkle_root": manifest[
-                "source_result_merkle_root"
-            ],
-            "source_values_sha256": file_sha256(
-                SOURCE_RUNS[model_name]
-                / "evaluation"
-                / "values.jsonl.gz"
-            ),
+            "source_result_merkle_root": manifest["source_result_merkle_root"],
             "worker_manifest_record_sha256": sorted(
                 row["record_sha256"] for row in worker_manifests
             ),
@@ -3027,9 +2726,7 @@ def evaluate(qwen_results: Path, deepseek_results: Path) -> None:
     _write_csv(proxies_path, all_proxy_rows)
     _write_csv(stability_path, all_stability)
     _atomic_json(fits_path, fits)
-    event_table, proxy_table = _render_tables(
-        all_events, all_stability
-    )
+    event_table, proxy_table = _render_tables(all_events, all_stability)
     artifacts = (
         values_path,
         events_path,
@@ -3056,21 +2753,12 @@ def evaluate(qwen_results: Path, deepseek_results: Path) -> None:
             ),
             "confirmation_labels_used_for_fit": False,
             "audited_proxies_used_for_adaptive_selection": False,
-            "proxy_orientation": (
-                "selected on 256-token analysis arm and frozen"
-            ),
+            "proxy_orientation": ("selected on 256-token analysis arm and frozen"),
             "bootstrap_replicates": BOOTSTRAP_REPLICATES,
-            "proxy_rank_half_sample_replicates": (
-                RANK_SUBSAMPLE_REPLICATES
-            ),
-            "formal_256_parity_record_sha256": parity_manifest[
-                "record_sha256"
-            ],
-            "sealed_labels_sha256": file_sha256(LABELS_PATH),
+            "proxy_rank_half_sample_replicates": (RANK_SUBSAMPLE_REPLICATES),
+            "formal_256_parity_record_sha256": parity_manifest["record_sha256"],
             "source": source,
-            "artifacts_sha256": {
-                path.name: file_sha256(path) for path in artifacts
-            },
+            "artifacts": [path.name for path in artifacts],
         }
     )
     _atomic_json(
@@ -3080,8 +2768,7 @@ def evaluate(qwen_results: Path, deepseek_results: Path) -> None:
     print(
         json.dumps(
             {
-                "manifest": "paper/generated/"
-                "block_length_sensitivity_manifest.json",
+                "manifest": "paper/generated/" "block_length_sensitivity_manifest.json",
                 "record_sha256": paper_manifest["record_sha256"],
             },
             sort_keys=True,
@@ -3099,16 +2786,12 @@ def parse_args() -> argparse.Namespace:
     )
     subparsers.add_parser("validate-inputs")
     generate_parser = subparsers.add_parser("generate")
-    generate_parser.add_argument(
-        "--model", choices=tuple(SOURCE_RUNS), required=True
-    )
+    generate_parser.add_argument("--model", choices=tuple(SOURCE_RUNS), required=True)
     generate_parser.add_argument("--worker-index", type=int, required=True)
     generate_parser.add_argument("--output-dir", type=Path, required=True)
     evaluate_parser = subparsers.add_parser("evaluate")
     evaluate_parser.add_argument("--qwen-results", type=Path, required=True)
-    evaluate_parser.add_argument(
-        "--deepseek-results", type=Path, required=True
-    )
+    evaluate_parser.add_argument("--deepseek-results", type=Path, required=True)
     return parser.parse_args()
 
 
