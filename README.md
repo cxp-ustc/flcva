@@ -1,48 +1,84 @@
-# FLCVA: anonymous review artifact
+<div align="center">
 
-This repository implements the **Full-Ledger Counterfactual Value Audit
-(FLCVA)**. For each frozen reasoning prefix, it compares an immediate
-answer with four fixed-length continuations, grades every endpoint with the
-same answer operator, and accounts for all observations used by a policy.
+# FLCVA
 
-## Contents
+### A Full-Ledger Counterfactual Audit of Adaptive Reasoning
 
-- `src/flcva/`: generation, scoring, evaluation, replay, statistics, and audit
-  implementation.
-- `configs/`: frozen campaign specification plus local mock and GPU examples.
-- `data/`: frozen public benchmark prompts and deterministic gold labels.
-- `paper/analysis/`: controller, replay, bootstrap, collision, and cost
-  analyses.
-- `paper/ablation/`: answer-cue and continuation-length robustness analyses.
-- `tests/`: focused tests for parsing, signed value, statistics, ledger
-  accounting, replay, and the end-to-end mock pipeline.
+**Accepted to EACL 2027 · Main Conference**
 
-## Installation
+Xiaopeng Chu · Wenzheng Kong · Wei Liu · Wenyi Zhang<sup>†</sup>  
+University of Science and Technology of China  
+<sup>†</sup>Corresponding author: [wenyizha@ustc.edu.cn](mailto:wenyizha@ustc.edu.cn)
 
-Python 3.10 or newer is required.
+[![EACL 2027](https://img.shields.io/badge/EACL_2027-Main_Conference-193B5A?style=flat-square)](https://2027.eacl.org/)
+[![Paper](https://img.shields.io/badge/Paper-OpenReview-8C1B13?style=flat-square)](https://openreview.net/forum?id=ubcaeqHVOy)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
+
+[Overview](#overview) · [Key findings](#key-findings) · [Quick start](#quick-start) · [Reproduction](#reproduction) · [Citation](#citation)
+
+</div>
+
+> **When is more reasoning worth its cost?** Detecting a wrong answer is only the first step: an adaptive system must also predict whether continuation will help and turn that prediction into better compute allocation.
+
+## Overview
+
+The **Full-Ledger Counterfactual Value Audit (FLCVA)** measures the value of continuing from the same frozen reasoning prefix. It compares answering immediately with four fixed-length continuations, evaluates every endpoint with the same answer procedure, and charges every observation used by an allocation policy.
+
+```mermaid
+flowchart LR
+    P["Frozen reasoning prefix"] --> S["Answer now"]
+    P --> C["Four 256-token continuations<br/>1 stored + 3 independently sampled"]
+    S --> V["Signed continuation value<br/>Correctness change / token cost"]
+    C --> V
+    V --> E["Evaluate signals and allocation<br/>Full cost accounting"]
+    classDef prefix fill:#DBEAF3,stroke:#254B67,color:#17354A,stroke-width:2px;
+    classDef action fill:#FFF1CC,stroke:#AA8138,color:#483510;
+    classDef value fill:#DDEEE4,stroke:#3D7C5F,color:#204D38,stroke-width:2px;
+    classDef evaluation fill:#EAE4F3,stroke:#796395,color:#49365E;
+    class P prefix;
+    class S,C action;
+    class V value;
+    class E evaluation;
+```
+
+The reported value is mean correctness change divided by mean continuation cost, including answer tokens, expressed **per 1,000 logical tokens**. The audit separates three questions:
+
+| Stage | Question | Evaluation |
+| :--- | :--- | :--- |
+| **Measure** | Does another reasoning block help or hurt? | Paired correctness change from the same prefix |
+| **Predict** | Can observable signals identify recoverable errors and vulnerable correct answers? | Held-out recovery and damage prediction |
+| **Allocate** | Do those predictions improve the use of a shared budget? | Accuracy–cost gains over a current-wrongness baseline |
+
+## Key findings
+
+The primary study evaluates **Qwen3-8B** and **DeepSeek-R1-Distill-Qwen-7B** on **GSM8K** and **MATH-500**, with an external replication on **DeepSeek-R1-Distill-Llama-8B**.
+
+| Primary model | Recovery of a wrong answer | Damage to a correct answer |
+| :--- | ---: | ---: |
+| Qwen3-8B | **26.6%** | 1.4% |
+| DeepSeek-R1-Distill-Qwen-7B | **18.9%** | 1.9% |
+
+These are single-draw rates for a randomly selected 256-token continuation, conditioned on the current answer being wrong or correct, respectively.
+
+- **Continuation can both repair and damage answers.** More reasoning is useful selectively.
+- **Answer persistence carries information beyond current correctness.** Its value as a predictor still needs a separate allocation test.
+- **Prediction does not automatically become better control.** Relative to the correctness shortcut, Ridge-M changes normalized AULC by −0.21% on Qwen3 and +0.70% on DeepSeek; the Qwen3 increment is inconclusive. The tested lightweight, myopic controllers show limited continuation-specific gains.
+
+## Quick start
+
+**Python 3.10+ is required.** The CPU mock pipeline lets you check the installation and complete workflow without downloading model weights.
 
 ```bash
+git clone https://github.com/cxp-ustc/flcva-review-artifact.git
+cd flcva-review-artifact
+
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-GPU generation additionally requires the frozen vLLM API series:
-
-```bash
-python -m pip install -r requirements-gpu.txt
-```
-
-These requirement files are thin entry points to the dependency groups in
-`pyproject.toml`, which remains the single source of dependency versions.
-
-Model and dataset revisions are pinned in `configs/frozen.yaml`. Remote model
-snapshots are resolved from Hugging Face at the specified commit. A local
-snapshot may instead be supplied through `FLCVA_MODEL_PATH` and
-`FLCVA_SCORER_PATH`; it must be a commit-named snapshot directory or contain a
-`.flcva_revision` file with the exact commit hash.
-
-## Fast verification
-
-The mock pipeline uses no GPU and produces no paper claim:
+Run all six stages and the tests:
 
 ```bash
 flcva preflight --config configs/mock.yaml
@@ -51,34 +87,105 @@ flcva score --config configs/mock.yaml
 flcva evaluate --config configs/mock.yaml
 flcva replay --config configs/mock.yaml
 flcva audit --config configs/mock.yaml
-pytest
+pytest -q
 ```
 
-## GPU protocol
+Outputs are written under `runs/`. The mock uses synthetic fixtures to exercise the pipeline; its outputs are not the paper's experimental results.
 
-The local examples retain the paper's model revisions, sampling parameters,
-four-spine design, 256-token checkpoints, four continuation branches, answer
-operator, and PRM:
+## Reproduction
+
+Model and dataset revisions are pinned in [`configs/frozen.yaml`](configs/frozen.yaml). The primary protocol uses four spines per problem, 256-token checkpoints, four continuation branches, and a common answer operator. Generation is label-blind; gold answers enter at evaluation.
+
+<details>
+<summary><strong>Run the primary-model GPU protocol</strong></summary>
+
+Use a CUDA environment compatible with the vLLM version specified in [`pyproject.toml`](pyproject.toml), then install the GPU dependencies:
+
+```bash
+python -m pip install -r requirements-gpu.txt
+```
+
+Generate and score both primary models:
 
 ```bash
 flcva preflight --config configs/formal-qwen3.yaml --require-gpu
 flcva generate --config configs/formal-qwen3.yaml
 flcva score --config configs/formal-qwen3.yaml
+
+flcva preflight --config configs/formal-deepseek.yaml --require-gpu
+flcva generate --config configs/formal-deepseek.yaml
+flcva score --config configs/formal-deepseek.yaml
 ```
 
-Formal execution is intentionally not started by this repository. Users should
-shard and schedule the same configuration using their own compute environment,
-then use `flcva merge`, `flcva evaluate`, `flcva replay`, and `flcva audit`.
+Evaluate each run with the complementary primary run as its difficulty reference, then replay and audit:
 
-## Analysis inputs
+```bash
+flcva evaluate --config configs/formal-qwen3.yaml \
+  --peer-run-dir runs/flcva-deepseek-local
+flcva evaluate --config configs/formal-deepseek.yaml \
+  --peer-run-dir runs/flcva-qwen3-local
 
-The main analysis renderer reads the two audited primary run directories shown
-in `ARTIFACT_SCOPE.md`. The Llama transfer renderer accepts an explicit
-replication directory. Full generated traces and model weights are omitted
-because of their size; the included mock pipeline exercises the same artifact
-schemas and stage boundaries.
+flcva replay --config configs/formal-qwen3.yaml
+flcva audit --config configs/formal-qwen3.yaml
+flcva replay --config configs/formal-deepseek.yaml
+flcva audit --config configs/formal-deepseek.yaml
+```
 
-## Anonymity
+These examples use one shard and the default `runs/` output root. For a distributed campaign, configure `execution.shard_index` and `execution.num_shards`, merge outputs with `flcva merge`, and pass the resulting run paths to evaluation. Full generation requires GPU resources and model downloads.
 
-This review copy contains no author names, affiliations, personal paths,
-credentials, private cluster configuration, or version-control history.
+`FLCVA_MODEL_PATH` and `FLCVA_SCORER_PATH` can point to local model snapshots. Each snapshot must use the pinned commit as its directory name or provide a matching `.flcva_revision` marker.
+
+</details>
+
+<details>
+<summary><strong>Render results and explore the analyses</strong></summary>
+
+The primary renderer takes two audited run directories:
+
+```bash
+python scripts/render_paper_results.py \
+  --qwen-run runs/flcva-qwen3-local \
+  --deepseek-run runs/flcva-deepseek-local
+```
+
+It writes result macros to `paper/results.tex` and figures and tables to `paper/generated/` by default. See [`ARTIFACT_SCOPE.md`](ARTIFACT_SCOPE.md) for the expected analysis inputs and artifact scope.
+
+- [`paper/analysis/`](paper/analysis/) contains controller decomposition, bootstrap, conditional-information, non-myopic scheduling, and transfer analyses.
+- [`paper/ablation/`](paper/ablation/) contains answer-cue and continuation-length robustness analyses.
+- [`configs/replication-llama.yaml`](configs/replication-llama.yaml) records the Llama replication campaign; [`scripts/render_llama_replication_results.py`](scripts/render_llama_replication_results.py) renders an audited replication run supplied with `--run-dir`.
+
+Full generated traces and model weights are not bundled. Rendering the scientific results requires the corresponding audited run artifacts; the CPU mock provides an independent installation check.
+
+</details>
+
+## Repository guide
+
+| Path | Contents |
+| :--- | :--- |
+| [`src/flcva/`](src/flcva/) | Generation, scoring, answer evaluation, ledgers, replay, statistics, and audit checks |
+| [`configs/`](configs/) | Frozen protocol, CPU mock, primary-model examples, and replication specification |
+| [`data/`](data/) | Public benchmark inputs, deterministic labels, and synthetic smoke fixtures |
+| [`scripts/`](scripts/) | Dataset preparation and result rendering |
+| [`paper/analysis/`](paper/analysis/) | Prediction and allocation analyses |
+| [`paper/ablation/`](paper/ablation/) | Answer-cue and continuation-length studies |
+| [`tests/`](tests/) | Parsing, value, accounting, replay, and pipeline checks |
+
+## Citation
+
+If this work informs your research, please cite the paper. The entry below records its EACL 2027 acceptance.
+
+```bibtex
+@misc{chu2027flcva,
+  title  = {A Full-Ledger Counterfactual Audit of Adaptive Reasoning},
+  author = {Chu, Xiaopeng and Kong, Wenzheng and Liu, Wei and Zhang, Wenyi},
+  year   = {2027},
+  note   = {Accepted to EACL 2027, Main Conference},
+  url    = {https://openreview.net/forum?id=ubcaeqHVOy}
+}
+```
+
+## Contact and usage terms
+
+For research questions, contact [Wenyi Zhang](mailto:wenyizha@ustc.edu.cn). For implementation questions, please [open an issue](https://github.com/cxp-ustc/flcva-review-artifact/issues).
+
+The repository's current usage terms are recorded in [`LICENSE_FOR_REVIEW.md`](LICENSE_FOR_REVIEW.md). Datasets and model snapshots remain subject to their original providers' licenses and terms.
