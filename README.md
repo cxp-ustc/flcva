@@ -8,7 +8,8 @@
 
 Xiaopeng Chu · Wenzheng Kong · Wei Liu · Wenyi Zhang<sup>†</sup>  
 University of Science and Technology of China  
-<sup>†</sup>Corresponding author: [wenyizha@ustc.edu.cn](mailto:wenyizha@ustc.edu.cn)
+Contact: Xiaopeng Chu ([cxphhh@mail.ustc.edu.cn](mailto:cxphhh@mail.ustc.edu.cn))  
+<sup>†</sup>Corresponding author: Wenyi Zhang ([wenyizha@ustc.edu.cn](mailto:wenyizha@ustc.edu.cn))
 
 [![EACL 2027](https://img.shields.io/badge/EACL_2027-Main_Conference-193B5A?style=flat-square)](https://2027.eacl.org/)
 [![Paper](https://img.shields.io/badge/Paper-OpenReview-8C1B13?style=flat-square)](https://openreview.net/forum?id=ubcaeqHVOy)
@@ -177,6 +178,6 @@ If this work informs your research, please cite the paper. The entry below recor
 
 ## Contact and usage terms
 
-For research questions, contact [Wenyi Zhang](mailto:wenyizha@ustc.edu.cn). For implementation questions, please [open an issue](https://github.com/cxp-ustc/flcva/issues).
+For research questions, contact Xiaopeng Chu ([cxphhh@mail.ustc.edu.cn](mailto:cxphhh@mail.ustc.edu.cn)) or Wenyi Zhang ([wenyizha@ustc.edu.cn](mailto:wenyizha@ustc.edu.cn)). For implementation questions, please [open an issue](https://github.com/cxp-ustc/flcva/issues).
 
 Copyright and usage information is provided in [`RIGHTS.md`](RIGHTS.md). No open-source license is granted. Datasets and model snapshots remain subject to their original providers' licenses and terms.
